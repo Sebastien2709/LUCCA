@@ -1,0 +1,15 @@
+/* Styles minimaux : Tailwind (CDN) gère le reste.
+   L'ancien fichier généré par Vite limitait #root à 1126px et centrait le texte. */
+html,
+body,
+#root {
+  width: 100%;
+  min-height: 100vh;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: system-ui, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
