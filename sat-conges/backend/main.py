@@ -276,3 +276,10 @@ def update_leave_status(leave_id: int, req: LeaveStatusUpdate, session: Session 
     """
     send_email_notification(leave.employee.email, f"[SAT Congés] Demande {decision_fr}", html)
     return leave
+
+import os
+import uvicorn
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
