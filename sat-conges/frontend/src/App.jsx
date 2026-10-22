@@ -19,7 +19,7 @@ import {
   X,
 } from "lucide-react";
 
-const API_URL = "http://127.0.0.1:8000/api";
+const API_URL = "https://lucca-production.up.railway.app/api";
 
 // Palette inspirée de Lucca
 const NAVY = "#1b1f5e";
