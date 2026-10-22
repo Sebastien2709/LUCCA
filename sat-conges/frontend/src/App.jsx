@@ -202,26 +202,31 @@ export default function App() {
   };
 
   // ---------- Connexion ----------
-  const handleLogin = async (e, quickEmail = null) => {
-    if (e) e.preventDefault();
-    setLoginError("");
-    const targetEmail = quickEmail || emailInput;
-    try {
-      const res = await fetch(`${API_URL}/login`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: targetEmail }),
-      });
-      if (!res.ok) {
-        const errData = await res.json();
-        throw new Error(errData.detail || "Erreur de connexion");
-      }
-      setUser(await res.json());
-      setEmailInput("");
-    } catch (err) {
-      setLoginError(err.message);
-    }
-  };
+const handleLogin = async (e, quickEmail = null) => {
+if (e) e.preventDefault();
+setLoginError("");
+const targetEmail = quickEmail || emailInput;
+
+try {
+  const res = await fetch(`${API_URL}/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email: targetEmail }),
+  });
+
+  if (!res.ok) {
+    const errorText = await res.text(); // Lit la réponse brute même si elle est vide
+    console.error(`Erreur serveur (${res.status}) :`, errorText);
+    throw new Error(`Le serveur a refusé la connexion (Code ${res.status}). Regarde les logs Render.`);
+  }
+
+  const userData = await res.json();
+  setUser(userData);
+  setEmailInput("");
+} catch (err) {
+  setLoginError(err.message);
+}
+};
 
   // ---------- Collaborateurs ----------
   const handleAddEmployee = async (e) => {
