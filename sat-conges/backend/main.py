@@ -101,6 +101,8 @@ class UserOut(BaseModel):
     email: str
     full_name: str
     role: str
+    solde_cp: float    # NOUVEAU
+    solde_rtt: float
     class Config:
         from_attributes = True
 
@@ -195,18 +197,35 @@ def delete_user(user_id: int, session: Session = Depends(get_db)):
 # --- ROUTES CONGÉS ---
 @app.post("/api/leaves", response_model=LeaveOut)
 def create_leave(req: LeaveCreate, session: Session = Depends(get_db)):
+    # 1. Récupérer l'utilisateur qui fait la demande
     user = session.query(db.User).filter(db.User.id == req.user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Utilisateur introuvable.")
 
+    # 2. Calculer le nombre de jours ouvrés réels de la demande
     details = calculate_working_days_details(req.start_date, req.end_date, req.start_half_day, req.end_half_day)
     days = details["days_count"]
+    
     if days <= 0:
         raise HTTPException(
             status_code=400,
             detail="La période sélectionnée ne contient aucun jour ouvré (uniquement week-end ou jour férié)."
         )
 
+    # 3. Vérifier le solde en fonction du type de congé
+    if req.leave_type == "CP" and days > user.solde_cp:
+        raise HTTPException(status_code=400, detail=f"Solde de CP insuffisant. Demandé: {days}, Disponible: {user.solde_cp}")
+        
+    elif req.leave_type == "RTT" and days > user.solde_rtt:
+        raise HTTPException(status_code=400, detail=f"Solde de RTT insuffisant. Demandé: {days}, Disponible: {user.solde_rtt}")
+    
+    # 4. Déduire le solde de l'utilisateur
+    if req.leave_type == "CP":
+        user.solde_cp -= days
+    elif req.leave_type == "RTT":
+        user.solde_rtt -= days
+
+    # 5. Créer la demande de congé
     new_leave = db.LeaveRequest(
         user_id=req.user_id,
         start_date=req.start_date,
@@ -221,6 +240,7 @@ def create_leave(req: LeaveCreate, session: Session = Depends(get_db)):
     session.commit()
     session.refresh(new_leave)
 
+    # 6. Envoi de l'email (inchangé)
     holidays_txt = ""
     if details["holidays"]:
         names = ", ".join([f"{h['name']} ({h['date']})" for h in details["holidays"]])
@@ -241,6 +261,7 @@ def create_leave(req: LeaveCreate, session: Session = Depends(get_db)):
     </div>
     """
     send_email_notification("rh@sat.fr", f"[SAT Congés] Nouvelle demande - {user.full_name}", html)
+    
     return new_leave
 
 @app.get("/api/leaves", response_model=List[LeaveOut])

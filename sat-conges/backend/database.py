@@ -18,7 +18,8 @@ class User(Base):
     email = Column(String, unique=True, index=True, nullable=False)
     full_name = Column(String, nullable=False)
     role = Column(String, default="employee")  # "employee" ou "admin"
-
+    solde_cp = Column(Float, default=25.0) 
+    solde_rtt = Column(Float, default=10.0)
     leaves = relationship("LeaveRequest", back_populates="employee")
 
 
