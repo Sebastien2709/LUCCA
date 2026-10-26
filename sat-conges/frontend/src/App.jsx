@@ -698,14 +698,30 @@ try {
         )}
         {renderCalendarGrid(false)}
 
-        <div className="bg-white rounded-xl border border-slate-200 p-5 flex items-center gap-4">
-          <div className="w-12 h-12 rounded-xl flex items-center justify-center text-2xl bg-[#ece8fb]">🏖️</div>
-          <p>
-            <span className="text-2xl font-extrabold" style={{ color: NAVY }}>
-              {totalApproved} jour(s)
-            </span>{" "}
-            <span className="text-sm text-slate-600">d'absence validé(s) (hors télétravail)</span>
-          </p>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="bg-white rounded-xl border border-slate-200 p-5 flex items-center gap-4">
+            <div className="w-12 h-12 rounded-xl flex items-center justify-center text-2xl bg-[#ece8fb]">🏖️</div>
+            <div>
+              <p className="text-sm text-slate-600">Solde Congés Payés (CP)</p>
+              <p className="text-2xl font-extrabold" style={{ color: NAVY }}>{user?.solde_cp} jour(s)</p>
+            </div>
+          </div>
+          
+          <div className="bg-white rounded-xl border border-slate-200 p-5 flex items-center gap-4">
+            <div className="w-12 h-12 rounded-xl flex items-center justify-center text-2xl bg-[#e0f2fe]">⏱️</div>
+            <div>
+              <p className="text-sm text-slate-600">Solde RTT</p>
+              <p className="text-2xl font-extrabold" style={{ color: NAVY }}>{user?.solde_rtt} jour(s)</p>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-xl border border-slate-200 p-5 flex items-center gap-4">
+            <div className="w-12 h-12 rounded-xl flex items-center justify-center text-2xl bg-[#f1f5f9]">📅</div>
+            <div>
+              <p className="text-sm text-slate-600">Absences validées</p>
+              <p className="text-2xl font-extrabold" style={{ color: NAVY }}>{totalApproved} jour(s)</p>
+            </div>
+          </div>
         </div>
 
         <div>
@@ -731,9 +747,6 @@ try {
               ))
             )}
           </div>
-          <p className="text-xs text-slate-400 mt-2">
-            Les soldes restants (jours acquis / à acquérir) arriveront dans une prochaine version.
-          </p>
         </div>
 
         <div>
