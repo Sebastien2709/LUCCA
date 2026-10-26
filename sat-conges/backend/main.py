@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 from datetime import date, timedelta, datetime
 from typing import Optional, List
 import holidays
@@ -10,6 +10,7 @@ import database as db
 from mailer import send_email_notification
 
 db.Base.metadata.create_all(bind=db.engine)
+db.ensure_columns()
 
 app = FastAPI(title="SAT - Gestion des Congés API")
 
@@ -28,50 +29,59 @@ def get_db():
     finally:
         session.close()
 
-# --- CALCUL DES JOURS OUVRÉS (HORS WEEK-ENDS ET JOURS FÉRIÉS FRANÇAIS) ---
-def is_working_day(d: date, fr_holidays) -> bool:
-    # 0 = Lundi ... 4 = Vendredi ET ne doit pas être dans le dictionnaire des jours fériés
-    return d.weekday() < 5 and d not in fr_holidays
+# --- CALCUL DES JOURS (CP = jours OUVRABLES lundi->samedi, autres = jours OUVRÉS lundi->vendredi) ---
+# Règle des jours ouvrables : un congé qui se termine un vendredi (journée complète) inclut le samedi suivant
+# (un vendredi seul compte donc 2 jours). Mais pas plus de 5 samedis décomptés par exercice.
+COMPTER_SAMEDI_APRES_VENDREDI = True
 
-def calculate_working_days_details(start: date, end: date, start_half: str, end_half: str):
+def calculate_working_days_details(start: date, end: date, start_half: str, end_half: str,
+                                   leave_type: str = "Congés Payés (CP)", saturdays_left: Optional[int] = None):
     if end < start:
-        return {"days_count": 0.0, "holidays": []}
+        return {"days_count": 0.0, "holidays": [], "saturdays_count": 0}
 
-    # Charge les jours fériés français pour la ou les années concernées
-    years = list(range(start.year, end.year + 1))
+    ouvrable = leave_type in db.CP_TYPES
+    max_wd = 5 if ouvrable else 4   # 4 = vendredi, 5 = samedi
+    if saturdays_left is None:
+        saturdays_left = db.MAX_SAMEDIS_PAR_EXERCICE
+
+    effective_end = end
+    if ouvrable and COMPTER_SAMEDI_APRES_VENDREDI and end.weekday() == 4 and end_half == "afternoon":
+        effective_end = end + timedelta(days=1)
+
+    years = list(range(start.year, effective_end.year + 1))
     fr_holidays = holidays.France(years=years, language="fr")
 
-    total_days = 0.0
+    weights = {}              # jour décompté -> poids (1 = journée entière)
     holidays_in_period = []
+    saturdays = 0
 
     current = start
-    while current <= end:
-        if current.weekday() < 5:  # Du Lundi au Vendredi
+    while current <= effective_end:
+        wd = current.weekday()
+        if wd <= max_wd:
             if current in fr_holidays:
                 holidays_in_period.append({
                     "date": current.isoformat(),
                     "name": fr_holidays.get(current)
                 })
+            elif wd == 5 and saturdays >= saturdays_left:
+                pass  # plafond de samedis atteint : ce samedi n'est pas décompté
             else:
-                total_days += 1.0
+                weights[current] = 1.0
+                if wd == 5:
+                    saturdays += 1
         current += timedelta(days=1)
 
-    # Ajustement des demi-journées (uniquement si le jour de début/fin est un vrai jour travaillé)
-    if start == end:
-        if is_working_day(start, fr_holidays):
-            if start_half == "afternoon" and end_half == "morning":
-                total_days = 0.0
-            elif start_half == "afternoon" or end_half == "morning":
-                total_days = 0.5
-    else:
-        if is_working_day(start, fr_holidays) and start_half == "afternoon":
-            total_days -= 0.5
-        if is_working_day(end, fr_holidays) and end_half == "morning":
-            total_days -= 0.5
+    # Demi-journées (uniquement si le jour de début/fin est réellement décompté)
+    if start in weights and start_half == "afternoon":
+        weights[start] -= 0.5
+    if end in weights and end_half == "morning":
+        weights[end] -= 0.5
 
     return {
-        "days_count": max(total_days, 0.0),
-        "holidays": holidays_in_period
+        "days_count": max(sum(weights.values()), 0.0),
+        "holidays": holidays_in_period,
+        "saturdays_count": saturdays
     }
 
 # --- SCHÉMAS PYDANTIC ---
@@ -82,6 +92,12 @@ class UserCreate(BaseModel):
     full_name: str
     email: EmailStr
     role: str = "employee"
+    droits_cp: float = 30.0
+
+class RightsUpdate(BaseModel):
+    droits_cp: Optional[float] = Field(default=None, ge=0, le=100)
+    droits_fractionnement: Optional[float] = Field(default=None, ge=0, le=100)
+    droits_rtt: Optional[float] = Field(default=None, ge=0, le=100)
 
 class LeaveCreate(BaseModel):
     user_id: int
@@ -101,7 +117,11 @@ class UserOut(BaseModel):
     email: str
     full_name: str
     role: str
-    solde_cp: float    # NOUVEAU
+    droits_cp: float
+    droits_fractionnement: float
+    droits_rtt: float
+    samedis_utilises: int
+    solde_cp: float    # calculé : droits - jours validés ou en attente (exercice en cours)
     solde_rtt: float
     class Config:
         from_attributes = True
@@ -148,9 +168,17 @@ def preview_leave_days(
     start_date: date,
     end_date: date,
     start_half_day: str = "morning",
-    end_half_day: str = "afternoon"
+    end_half_day: str = "afternoon",
+    leave_type: str = "Congés Payés (CP)",
+    user_id: Optional[int] = None,
+    session: Session = Depends(get_db)
 ):
-    return calculate_working_days_details(start_date, end_date, start_half_day, end_half_day)
+    saturdays_left = None
+    if user_id and leave_type in db.CP_TYPES:
+        u = session.query(db.User).filter(db.User.id == user_id).first()
+        if u:
+            saturdays_left = u.samedis_restants(start_date)
+    return calculate_working_days_details(start_date, end_date, start_half_day, end_half_day, leave_type, saturdays_left)
 
 # --- ROUTES AUTH & UTILISATEURS ---
 @app.post("/api/login", response_model=UserOut)
@@ -174,12 +202,28 @@ def create_user(req: UserCreate, session: Session = Depends(get_db)):
     new_user = db.User(
         full_name=req.full_name.strip(),
         email=clean_email,
-        role=req.role
+        role=req.role,
+        droits_cp=req.droits_cp
     )
     session.add(new_user)
     session.commit()
     session.refresh(new_user)
     return new_user
+
+@app.patch("/api/users/{user_id}/rights", response_model=UserOut)
+def update_rights(user_id: int, req: RightsUpdate, session: Session = Depends(get_db)):
+    user = session.query(db.User).filter(db.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Utilisateur introuvable.")
+    if req.droits_cp is not None:
+        user.droits_cp = req.droits_cp
+    if req.droits_fractionnement is not None:
+        user.droits_fractionnement = req.droits_fractionnement
+    if req.droits_rtt is not None:
+        user.droits_rtt = req.droits_rtt
+    session.commit()
+    session.refresh(user)
+    return user
 
 @app.delete("/api/users/{user_id}")
 def delete_user(user_id: int, session: Session = Depends(get_db)):
@@ -203,7 +247,10 @@ def create_leave(req: LeaveCreate, session: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Utilisateur introuvable.")
 
     # 2. Calculer le nombre de jours ouvrés réels de la demande
-    details = calculate_working_days_details(req.start_date, req.end_date, req.start_half_day, req.end_half_day)
+    saturdays_left = user.samedis_restants(req.start_date) if req.leave_type in db.CP_TYPES else None
+    details = calculate_working_days_details(
+        req.start_date, req.end_date, req.start_half_day, req.end_half_day, req.leave_type, saturdays_left
+    )
     days = details["days_count"]
     
     if days <= 0:
@@ -212,18 +259,16 @@ def create_leave(req: LeaveCreate, session: Session = Depends(get_db)):
             detail="La période sélectionnée ne contient aucun jour ouvré (uniquement week-end ou jour férié)."
         )
 
-    # 3. Vérifier le solde en fonction du type de congé
-    if req.leave_type == "CP" and days > user.solde_cp:
-        raise HTTPException(status_code=400, detail=f"Solde de CP insuffisant. Demandé: {days}, Disponible: {user.solde_cp}")
-        
-    elif req.leave_type == "RTT" and days > user.solde_rtt:
-        raise HTTPException(status_code=400, detail=f"Solde de RTT insuffisant. Demandé: {days}, Disponible: {user.solde_rtt}")
-    
-    # 4. Déduire le solde de l'utilisateur
-    if req.leave_type == "CP":
-        user.solde_cp -= days
-    elif req.leave_type == "RTT":
-        user.solde_rtt -= days
+    # 3. Vérifier le solde de l'exercice (droits - jours validés ou en attente)
+    solde = user.solde_for(req.leave_type, req.start_date)
+    if solde is not None and days > solde:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Le nombre de jours posés sur ce compte ({days}) est supérieur au nombre de jours maximum disponible ({solde})."
+        )
+
+    # 4. Pas de déduction à stocker : le solde est recalculé à chaque lecture.
+    #    Une demande refusée libère donc automatiquement ses jours.
 
     # 5. Créer la demande de congé
     new_leave = db.LeaveRequest(
@@ -233,6 +278,7 @@ def create_leave(req: LeaveCreate, session: Session = Depends(get_db)):
         end_date=req.end_date,
         end_half_day=req.end_half_day,
         days_count=days,
+        saturdays_count=details["saturdays_count"],
         leave_type=req.leave_type,
         employee_comment=req.employee_comment
     )
@@ -253,7 +299,7 @@ def create_leave(req: LeaveCreate, session: Session = Depends(get_db)):
         <ul>
             <li><strong>Type :</strong> {req.leave_type}</li>
             <li><strong>Période :</strong> Du {req.start_date} au {req.end_date}</li>
-            <li><strong>Durée décomptée :</strong> {days} jour(s) ouvré(s)</li>
+            <li><strong>Durée décomptée :</strong> {days} jour(s)</li>
             {holidays_txt}
             <li><strong>Motif :</strong> {req.employee_comment or 'Non précisé'}</li>
         </ul>

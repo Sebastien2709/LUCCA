@@ -118,6 +118,7 @@ export default function App() {
   const [newEmpName, setNewEmpName] = useState("");
   const [newEmpEmail, setNewEmpEmail] = useState("");
   const [empMsg, setEmpMsg] = useState("");
+  const [rightsDraft, setRightsDraft] = useState({}); // droits en cours de saisie par la RH
 
   // Sélection de dates + demande
   const [startDate, setStartDate] = useState("");
@@ -152,6 +153,8 @@ export default function App() {
           end_date: endDate,
           start_half_day: startHalf,
           end_half_day: endHalf,
+          leave_type: leaveType,
+          ...(user ? { user_id: user.id } : {}),
         });
         const res = await fetch(`${API_URL}/leaves/preview?${params}`);
         if (res.ok) setPreviewData(await res.json());
@@ -160,7 +163,7 @@ export default function App() {
       }
     };
     run();
-  }, [startDate, endDate, startHalf, endHalf]);
+  }, [startDate, endDate, startHalf, endHalf, leaveType, user?.id]);
 
   // Le message de succès disparaît tout seul
   useEffect(() => {
@@ -265,6 +268,30 @@ try {
   };
 
   // ---------- Sélection sur le calendrier ----------
+  const handleSaveRights = async (emp) => {
+    const d = rightsDraft[emp.id];
+    if (!d) return;
+    const body = {};
+    ["droits_cp", "droits_fractionnement", "droits_rtt"].forEach((k) => {
+      if (d[k] !== undefined && d[k] !== "") body[k] = parseFloat(String(d[k]).replace(",", "."));
+    });
+    try {
+      const res = await fetch(`${API_URL}/users/${emp.id}/rights`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error("Valeur invalide : saisis un nombre entre 0 et 100.");
+      const copy = { ...rightsDraft };
+      delete copy[emp.id];
+      setRightsDraft(copy);
+      setEmpMsg(`Droits de ${emp.full_name} mis à jour.`);
+      fetchEmployees();
+    } catch (err) {
+      setEmpMsg(err.message);
+    }
+  };
+
   const handleDayClick = (d) => {
     const key = formatYMD(d);
     const dow = d.getDay();
@@ -316,6 +343,13 @@ try {
         text: "Demande envoyée ! La RH a été notifiée par email.",
       });
       fetchLeaves();
+      // Met à jour les soldes affichés (calculés par le serveur)
+      const me = await fetch(`${API_URL}/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: user.email }),
+      });
+      if (me.ok) setUser(await me.json());
     } catch (err) {
       setFormMessage({ type: "error", text: err.message });
     }
@@ -1140,7 +1174,7 @@ try {
                 </div>
                 <div className="bg-[#f3f0ff] rounded-lg p-3">
                   <p className="text-xs text-slate-500">Durée</p>
-                  <p className="font-semibold">{selected.days_count} jour(s) ouvré(s)</p>
+                  <p className="font-semibold">{selected.days_count} jour(s)</p>
                 </div>
                 <div className="bg-[#f3f0ff] rounded-lg p-3 col-span-2">
                   <p className="text-xs text-slate-500">Période</p>
@@ -1221,27 +1255,59 @@ try {
           <h2 className="text-lg font-extrabold" style={{ color: NAVY }}>Effectif ({employees.length})</h2>
         </div>
         <div className="divide-y divide-slate-100">
-          {employees.map((emp) => (
-            <div key={emp.id} className="p-4 flex items-center justify-between hover:bg-slate-50">
-              <div>
-                <p className="font-semibold text-sm text-slate-900">
-                  {emp.full_name}
-                  {emp.role === "admin" && (
-                    <span className="ml-2 text-[10px] uppercase px-2 py-0.5 bg-[#ddd6fb] text-[#3b2a8f] rounded-full font-bold">
-                      Admin RH
-                    </span>
+          {employees.map((emp) => {
+            const d = rightsDraft[emp.id] || {};
+            const val = (k) => (d[k] !== undefined ? d[k] : emp[k]);
+            const setVal = (k, v) => setRightsDraft({ ...rightsDraft, [emp.id]: { ...d, [k]: v } });
+            const fields = [
+              ["droits_cp", "CP (principale + 5e sem. + anc.)"],
+              ["droits_fractionnement", "Fractionnement"],
+              ["droits_rtt", "RTT"],
+            ];
+            return (
+              <div key={emp.id} className="p-4 hover:bg-slate-50">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="font-semibold text-sm text-slate-900">
+                      {emp.full_name}
+                      {emp.role === "admin" && (
+                        <span className="ml-2 text-[10px] uppercase px-2 py-0.5 bg-[#ddd6fb] text-[#3b2a8f] rounded-full font-bold">
+                          Admin RH
+                        </span>
+                      )}
+                    </p>
+                    <p className="text-xs text-slate-500">{emp.email}</p>
+                  </div>
+                  {emp.role !== "admin" && (
+                    <button onClick={() => handleDeleteEmployee(emp.id, emp.full_name)}
+                      className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg cursor-pointer" title="Supprimer">
+                      <Trash2 className="w-4 h-4" />
+                    </button>
                   )}
-                </p>
-                <p className="text-xs text-slate-500">{emp.email}</p>
+                </div>
+                {emp.role !== "admin" && (
+                  <div className="mt-3 flex flex-wrap items-end gap-3">
+                    {fields.map(([key, label]) => (
+                      <label key={key} className="text-[11px] font-semibold uppercase text-slate-500">
+                        {label}
+                        <input type="number" min="0" step="0.5" value={val(key)}
+                          onChange={(e) => setVal(key, e.target.value)}
+                          className="block w-28 mt-1 px-2 py-1.5 rounded-lg border border-slate-300 text-sm font-normal normal-case text-slate-900 outline-none focus:ring-2 focus:ring-[#6b4fd8]" />
+                      </label>
+                    ))}
+                    <button onClick={() => handleSaveRights(emp)} disabled={Object.keys(d).length === 0}
+                      className="px-3 py-1.5 text-white text-xs font-semibold rounded-lg cursor-pointer hover:opacity-90 disabled:opacity-30 disabled:cursor-default"
+                      style={{ backgroundColor: PURPLE }}>
+                      Enregistrer
+                    </button>
+                    <p className="text-xs text-slate-500 ml-auto">
+                      Solde dispo : <strong>{emp.solde_cp} CP</strong> · <strong>{emp.solde_rtt} RTT</strong> · {emp.samedis_utilises}/5 samedis
+                    </p>
+                  </div>
+                )}
               </div>
-              {emp.role !== "admin" && (
-                <button onClick={() => handleDeleteEmployee(emp.id, emp.full_name)}
-                  className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg cursor-pointer" title="Supprimer">
-                  <Trash2 className="w-4 h-4" />
-                </button>
-              )}
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
     </div>
