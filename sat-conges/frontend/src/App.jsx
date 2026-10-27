@@ -96,7 +96,46 @@ const exerciseStart = (d = new Date()) => (d.getMonth() >= 4 ? d.getFullYear() :
 const inExercise = (dateStr, startYear) => dateStr >= `${startYear}-05-01` && dateStr < `${startYear + 1}-05-01`;
 const halfLabel = (h) => (h === "morning" ? "matin" : "après-midi");
 
+class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+  componentDidCatch(error, info) {
+    console.error("Erreur d'affichage", error, info);
+  }
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <div style={{ maxWidth: 640, margin: "60px auto", padding: 24, fontFamily: "system-ui, sans-serif" }}>
+        <h2 style={{ color: "#1b1f5e" }}>⚠️ Oups, l'application a rencontré une erreur</h2>
+        <p style={{ color: "#475569" }}>
+          Recharge la page (Ctrl + F5). Si ça recommence, envoie une capture de ce message :
+        </p>
+        <pre style={{ background: "#fef2f2", color: "#991b1b", padding: 12, borderRadius: 8, whiteSpace: "pre-wrap", fontSize: 13 }}>
+          {String(this.state.error && (this.state.error.stack || this.state.error.message || this.state.error)).slice(0, 700)}
+        </pre>
+        <button onClick={() => window.location.reload()}
+          style={{ padding: "8px 16px", background: "#6b4fd8", color: "white", border: 0, borderRadius: 8, cursor: "pointer" }}>
+          Recharger
+        </button>
+      </div>
+    );
+  }
+}
+
 export default function App() {
+  return (
+    <ErrorBoundary>
+      <AppContent />
+    </ErrorBoundary>
+  );
+}
+
+function AppContent() {
   const [user, setUser] = useState(null);
   const [emailInput, setEmailInput] = useState("");
   const [loginError, setLoginError] = useState("");
@@ -130,6 +169,10 @@ export default function App() {
   const [empSearch, setEmpSearch] = useState("");
   const [openEmpId, setOpenEmpId] = useState(null);
   const [histScope, setHistScope] = useState("current"); // "current" | "all"
+  const [team, setTeam] = useState([]);              // collaborateurs dont l'utilisateur est le manager
+  const [teamLeaves, setTeamLeaves] = useState([]);  // demandes de son équipe
+  const [overrideId, setOverrideId] = useState(null); // RH qui décide à la place d'un manager
+  const [apiError, setApiError] = useState("");
 
   // Sélection de dates + demande
   const [startDate, setStartDate] = useState("");
@@ -146,6 +189,7 @@ export default function App() {
       fetchLeaves();
       fetchHolidays();
       if (user.role === "admin") fetchEmployees();
+      if (user.is_manager) fetchTeam();
       setView(user.role === "admin" ? "approval" : "calendar");
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -200,16 +244,34 @@ export default function App() {
           ? `${API_URL}/leaves`
           : `${API_URL}/leaves?user_id=${user.id}`;
       const res = await fetch(url);
-      setLeaves(await res.json());
+      const data = await res.json();
+      if (!res.ok || !Array.isArray(data)) throw new Error(`Chargement des congés impossible (code ${res.status}).`);
+      setLeaves(data);
+      setApiError("");
     } catch (err) {
       console.error("Erreur lors du chargement des congés", err);
+      setApiError(`${err.message} Le serveur est peut-être en train de se réveiller : réessaie dans une minute.`);
+    }
+  };
+
+  const fetchTeam = async () => {
+    try {
+      const [u, l] = await Promise.all([
+        fetch(`${API_URL}/users?manager_id=${user.id}`).then((r) => r.json()),
+        fetch(`${API_URL}/leaves?manager_id=${user.id}`).then((r) => r.json()),
+      ]);
+      if (Array.isArray(u)) setTeam(u);
+      if (Array.isArray(l)) setTeamLeaves(l);
+    } catch (err) {
+      console.error("Erreur chargement équipe", err);
     }
   };
 
   const fetchEmployees = async () => {
     try {
       const res = await fetch(`${API_URL}/users`);
-      setEmployees(await res.json());
+      const data = await res.json();
+      if (Array.isArray(data)) setEmployees(data);
     } catch (err) {
       console.error("Erreur chargement employés", err);
     }
@@ -279,6 +341,34 @@ try {
   };
 
   // ---------- Sélection sur le calendrier ----------
+  const handleMarkSeen = async (leaveId) => {
+    try {
+      await fetch(`${API_URL}/leaves/${leaveId}/seen`, { method: "PATCH" });
+      fetchLeaves();
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleSetManager = async (emp, value) => {
+    try {
+      const res = await fetch(`${API_URL}/users/${emp.id}/manager`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ manager_id: value === "" ? null : Number(value) }),
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        alert(errData.detail || "Erreur lors du changement de manager");
+        return;
+      }
+      fetchEmployees();
+      fetchLeaves();
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
   const handleSaveRights = async (emp) => {
     const d = rightsDraft[emp.id];
     if (!d) return;
@@ -347,11 +437,14 @@ try {
         const errData = await res.json();
         throw new Error(errData.detail || "Erreur lors de l'envoi");
       }
+      const created = await res.json();
       setShowModal(false);
       resetSelection();
       setFormMessage({
         type: "success",
-        text: "Demande envoyée ! La RH a été notifiée par email.",
+        text: created.manager_name
+          ? `Demande envoyée à ton manager ${created.manager_name} ! La RH en est informée.`
+          : "Demande envoyée ! La RH a été notifiée par email.",
       });
       fetchLeaves();
       // Met à jour les soldes affichés (calculés par le serveur)
@@ -375,12 +468,18 @@ try {
         body: JSON.stringify({
           status: newStatus,
           admin_comment: adminComments[leaveId] || "",
+          decided_by_id: user.id,
         }),
       });
       if (res.ok) {
         setSelectedId(null);
+        setOverrideId(null);
         fetchLeaves();
-        fetchEmployees();
+        if (user.role === "admin") fetchEmployees();
+        if (user.is_manager) fetchTeam();
+      } else {
+        const errData = await res.json().catch(() => ({}));
+        alert(errData.detail || "Erreur lors de la décision");
       }
     } catch (err) {
       console.error("Erreur lors de la mise à jour", err);
@@ -501,15 +600,24 @@ try {
   // DONNÉES DÉRIVÉES
   // =========================================================================
   const isAdmin = user.role === "admin";
-  const pendingLeaves = leaves.filter((l) => l.status === "pending");
-  const doneLeaves = leaves.filter((l) => l.status !== "pending");
+  // RH : seules les demandes SANS manager sont à traiter ; les autres sont de simples notifications
+  const pendingLeaves = leaves.filter((l) => l.status === "pending" && !l.manager_id);
+  const doneLeaves = leaves.filter((l) => l.status !== "pending" && !l.manager_id);
+  const notifLeaves = leaves
+    .filter((l) => l.manager_id)
+    .sort((a, b) => (a.rh_seen === b.rh_seen ? (a.created_at < b.created_at ? 1 : -1) : a.rh_seen ? 1 : -1));
+  const unseenCount = notifLeaves.filter((l) => !l.rh_seen).length;
   const pendingCount = pendingLeaves.length;
+  // Manager : demandes de son équipe
+  const teamPending = teamLeaves.filter((l) => l.status === "pending");
+  const teamDone = teamLeaves.filter((l) => l.status !== "pending");
+  const planLeaves = isAdmin ? leaves : [...leaves, ...teamLeaves];
   const today = new Date();
   const todayKey = formatYMD(today);
 
   const nav = isAdmin
     ? [
-        { key: "approval", label: "Approbation", icon: Check, badge: pendingCount },
+        { key: "approval", label: "Approbation", icon: Check, badge: pendingCount + unseenCount },
         { key: "planning", label: "Planning", icon: Eye },
         { key: "employees", label: "Collaborateurs", icon: Users },
         { key: "exports", label: "Exports", icon: Download },
@@ -518,6 +626,7 @@ try {
         { key: "calendar", label: "Mon calendrier", icon: CalendarDays },
         { key: "request", label: "Demande", icon: Send },
         { key: "planning", label: "Planning", icon: Eye },
+        ...(user.is_manager ? [{ key: "team", label: "Équipe", icon: Users, badge: teamPending.length }] : []),
       ];
 
   // Congé d'un utilisateur à une date (hors week-end / férié / refusé)
@@ -527,7 +636,7 @@ try {
     const key = formatYMD(d);
     if (holidaysMap[key]) return null;
     return (
-      leaves.find(
+      planLeaves.find(
         (l) =>
           l.user_id === userId &&
           l.status !== "rejected" &&
@@ -1021,7 +1130,7 @@ try {
   const renderPlanning = () => {
     const days = Array.from({ length: 42 }, (_, i) => addDays(planStart, i));
     const weeks = Array.from({ length: 6 }, (_, i) => addDays(planStart, i * 7));
-    const rows = isAdmin ? employees.filter((e) => e.role !== "admin") : [user];
+    const rows = isAdmin ? employees.filter((e) => e.role !== "admin") : [user, ...team];
 
     return (
       <div className="space-y-4">
@@ -1114,27 +1223,44 @@ try {
   // =========================================================================
   // VUE : APPROBATION (liste + détail)
   // =========================================================================
-  const renderApproval = () => {
-    const list = adminTab === "todo" ? pendingLeaves : doneLeaves;
-    const selected = leaves.find((l) => l.id === selectedId);
+  const renderApproval = (mode = "rh") => {
+    const isMgr = mode === "manager";
+    const tabs = isMgr
+      ? [
+          { key: "todo", label: "À valider", list: teamPending, count: teamPending.length },
+          { key: "done", label: "Traitées", list: teamDone, count: teamDone.length },
+        ]
+      : [
+          { key: "todo", label: "À traiter", list: pendingLeaves, count: pendingLeaves.length },
+          { key: "notif", label: "Notifications", list: notifLeaves, count: unseenCount },
+          { key: "done", label: "Traitées", list: doneLeaves, count: doneLeaves.length },
+        ];
+    const activeTab = tabs.some((t) => t.key === adminTab) ? adminTab : "todo";
+    const list = tabs.find((t) => t.key === activeTab).list;
+    const selected = (isMgr ? teamLeaves : leaves).find((l) => l.id === selectedId);
+    // La RH peut décider à la place d'un manager seulement après l'avoir demandé explicitement
+    const canDecide =
+      selected && selected.status === "pending" && (isMgr || !selected.manager_id || overrideId === selected.id);
 
     return (
       <div className="grid grid-cols-1 lg:grid-cols-12 bg-white rounded-xl border border-slate-200 overflow-hidden min-h-[520px]">
         <div className="lg:col-span-5 border-r border-slate-200">
           <div className="flex border-b border-slate-200">
-            {[
-              { key: "todo", label: "À traiter", count: pendingCount },
-              { key: "done", label: "Traitées", count: doneLeaves.length },
-            ].map((t) => (
+            {tabs.map((t) => (
               <button key={t.key} onClick={() => { setAdminTab(t.key); setSelectedId(null); }}
-                className={`flex items-center gap-2 px-5 py-4 text-sm font-medium cursor-pointer border-b-2 ${
-                  adminTab === t.key ? "bg-[#f3f0ff] border-[#6b4fd8] text-[#6b4fd8]" : "border-transparent text-slate-600 hover:bg-slate-50"
+                className={`flex items-center gap-2 px-4 py-4 text-sm font-medium cursor-pointer border-b-2 ${
+                  activeTab === t.key ? "bg-[#f3f0ff] border-[#6b4fd8] text-[#6b4fd8]" : "border-transparent text-slate-600 hover:bg-slate-50"
                 }`}>
                 {t.label}
                 <span className="px-2 py-0.5 rounded-full text-xs bg-[#ddd6fb] text-[#3b2a8f] font-semibold">{t.count}</span>
               </button>
             ))}
           </div>
+          {activeTab === "notif" && (
+            <p className="px-6 py-3 text-xs text-slate-500 bg-slate-50 border-b border-slate-100">
+              Ces demandes sont validées par le manager du collaborateur. Vous êtes simplement informé(e).
+            </p>
+          )}
           {list.length === 0 ? (
             <p className="p-10 text-center text-sm text-slate-400">Rien à afficher ici.</p>
           ) : (
@@ -1145,6 +1271,9 @@ try {
                     selectedId === l.id ? "bg-[#f3f0ff]" : "hover:bg-slate-50"
                   }`}>
                   <p className="font-medium text-slate-900 flex items-center gap-2">
+                    {activeTab === "notif" && !l.rh_seen && (
+                      <span className="w-2 h-2 rounded-full inline-block shrink-0" style={{ backgroundColor: PURPLE }} title="Non lu" />
+                    )}
                     <TypeDot type={l.leave_type} /> {l.employee.full_name}
                   </p>
                   <p className="text-sm text-slate-500 flex items-center gap-2">
@@ -1157,6 +1286,12 @@ try {
                       <XCircle className="w-4 h-4 text-rose-600" />
                     )}
                   </p>
+                  {activeTab === "notif" && (
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      Manager : {l.manager_name}
+                      {l.decided_by_name ? ` · décidé par ${l.decided_by_name}` : " · en attente de sa décision"}
+                    </p>
+                  )}
                 </button>
               ))}
             </div>
@@ -1167,7 +1302,9 @@ try {
           {!selected ? (
             <div className="text-center text-slate-400">
               <Mail className="w-24 h-24 mx-auto text-[#d9d4f7]" strokeWidth={1} />
-              <p className="mt-3 text-sm">Sélectionnez une demande pour la traiter</p>
+              <p className="mt-3 text-sm">
+                {isMgr ? "Sélectionnez une demande de votre équipe" : "Sélectionnez une demande pour la traiter"}
+              </p>
             </div>
           ) : (
             <div className="w-full max-w-lg bg-white rounded-xl border border-slate-200 p-6 space-y-4">
@@ -1175,6 +1312,9 @@ try {
                 <div>
                   <h3 className="text-lg font-extrabold" style={{ color: NAVY }}>{selected.employee.full_name}</h3>
                   <p className="text-xs text-slate-500">{selected.employee.email}</p>
+                  <p className="text-xs text-slate-500 mt-1">
+                    Solde actuel : <strong>{selected.employee.solde_cp} CP</strong> · <strong>{selected.employee.solde_rtt} RTT</strong>
+                  </p>
                 </div>
                 {renderStatusPill(selected.status)}
               </div>
@@ -1197,13 +1337,20 @@ try {
                 </div>
               </div>
 
+              {selected.manager_name && !isMgr && (
+                <p className="text-xs text-slate-600 bg-slate-50 rounded-lg p-3">
+                  Manager : <strong>{selected.manager_name}</strong>
+                  {selected.decided_by_name && <> · Décision de <strong>{selected.decided_by_name}</strong></>}
+                </p>
+              )}
+
               {selected.employee_comment && (
                 <p className="text-sm text-slate-600 bg-slate-50 rounded-lg p-3 italic">
                   💬 « {selected.employee_comment} »
                 </p>
               )}
 
-              {selected.status === "pending" ? (
+              {canDecide ? (
                 <>
                   <textarea rows="2" placeholder="Note pour le collaborateur (facultatif)…"
                     value={adminComments[selected.id] || ""}
@@ -1220,10 +1367,29 @@ try {
                     </button>
                   </div>
                 </>
+              ) : selected.status === "pending" ? (
+                <div className="text-sm bg-amber-50 border border-amber-200 text-amber-900 rounded-lg p-3 space-y-2">
+                  <p>
+                    En attente de la décision de <strong>{selected.manager_name}</strong>. La RH est simplement informée.
+                  </p>
+                  <button onClick={() => setOverrideId(selected.id)}
+                    className="text-xs font-semibold underline cursor-pointer">
+                    Décider à sa place (absence du manager, par exemple)
+                  </button>
+                </div>
               ) : (
                 selected.admin_comment && (
-                  <p className="text-sm text-slate-600">Note RH : « {selected.admin_comment} »</p>
+                  <p className="text-sm text-slate-600">
+                    Note {selected.decided_by_name ? `de ${selected.decided_by_name}` : "RH"} : « {selected.admin_comment} »
+                  </p>
                 )
+              )}
+
+              {!isMgr && selected.manager_id && !selected.rh_seen && (
+                <button onClick={() => handleMarkSeen(selected.id)}
+                  className="w-full py-2 text-sm font-semibold rounded-lg border border-slate-300 hover:bg-slate-50 cursor-pointer">
+                  Marquer comme vu
+                </button>
               )}
             </div>
           )}
@@ -1301,6 +1467,24 @@ try {
                 <span key={t}> · {TYPE_STYLES[t] ? TYPE_STYLES[t].label : t} : <strong>{n} j</strong></span>
               ))}
             </p>
+          </div>
+
+          <div className="rounded-xl border border-slate-200 bg-white p-4">
+            <p className="text-xs font-semibold uppercase text-slate-500 mb-3">
+              Manager — valide les demandes de {emp.full_name}
+            </p>
+            <div className="flex flex-wrap items-center gap-3">
+              <select value={emp.manager_id ?? ""} onChange={(e) => handleSetManager(emp, e.target.value)}
+                className="px-3 py-2 rounded-lg border border-slate-300 text-sm outline-none focus:ring-2 focus:ring-[#6b4fd8] bg-white">
+                <option value="">Aucun : la RH valide</option>
+                {employees.filter((m) => m.role !== "admin" && m.id !== emp.id).map((m) => (
+                  <option key={m.id} value={m.id}>{m.full_name}</option>
+                ))}
+              </select>
+              <span className="text-xs text-slate-500">
+                {emp.manager_id ? "La RH reçoit une notification pour chaque demande." : "Sans manager, c'est la RH qui valide."}
+              </span>
+            </div>
           </div>
 
           <div className="rounded-xl border border-slate-200 bg-white p-4">
@@ -1455,8 +1639,15 @@ try {
                               Admin RH
                             </span>
                           )}
+                          {!isAdmin && emp.is_manager && (
+                            <span className="ml-2 text-[10px] uppercase px-2 py-0.5 bg-sky-100 text-sky-800 rounded-full font-bold">
+                              Manager
+                            </span>
+                          )}
                         </p>
-                        <p className="text-xs text-slate-500 truncate">{emp.email}</p>
+                        <p className="text-xs text-slate-500 truncate">
+                          {emp.email}{emp.manager_name ? ` · Manager : ${emp.manager_name}` : ""}
+                        </p>
                       </div>
                       {!isAdmin && (
                         <div className="hidden sm:flex items-center gap-2 text-xs shrink-0">
@@ -1580,10 +1771,14 @@ try {
       {/* Contenu : prend tout l'espace restant */}
       <main className="flex-1 min-w-0 w-full p-4 md:p-8 text-left">
         <h1 className="text-2xl font-extrabold mb-5" style={{ color: NAVY }}>{titles[view]}</h1>
+        {apiError && (
+          <div className="mb-4 p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-sm">⚠️ {apiError}</div>
+        )}
         {view === "calendar" && renderCalendar()}
         {view === "request" && renderRequest()}
         {view === "planning" && renderPlanning()}
-        {view === "approval" && renderApproval()}
+        {view === "approval" && renderApproval("rh")}
+        {view === "team" && renderApproval("manager")}
         {view === "employees" && renderEmployees()}
         {view === "exports" && renderExports()}
       </main>
