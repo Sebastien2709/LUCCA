@@ -94,6 +94,9 @@ class UserCreate(BaseModel):
     role: str = "employee"
     droits_cp: float = 30.0
 
+class ManagerUpdate(BaseModel):
+    manager_id: Optional[int] = None   # None = pas de manager, la RH valide
+
 class RightsUpdate(BaseModel):
     droits_cp: Optional[float] = Field(default=None, ge=0, le=100)
     droits_fractionnement: Optional[float] = Field(default=None, ge=0, le=100)
@@ -111,6 +114,7 @@ class LeaveCreate(BaseModel):
 class LeaveStatusUpdate(BaseModel):
     status: str  # "approved" ou "rejected"
     admin_comment: Optional[str] = None
+    decided_by_id: int   # qui décide : la RH ou le manager de l'employé
 
 class UserOut(BaseModel):
     id: int
@@ -120,6 +124,9 @@ class UserOut(BaseModel):
     droits_cp: float
     droits_fractionnement: float
     droits_rtt: float
+    manager_id: Optional[int] = None
+    manager_name: Optional[str] = None
+    is_manager: bool = False
     samedis_utilises: int
     solde_cp: float    # calculé : droits - jours validés ou en attente (exercice en cours)
     solde_rtt: float
@@ -139,6 +146,10 @@ class LeaveOut(BaseModel):
     employee_comment: Optional[str]
     admin_comment: Optional[str]
     created_at: datetime
+    manager_id: Optional[int] = None
+    manager_name: Optional[str] = None
+    decided_by_name: Optional[str] = None
+    rh_seen: Optional[bool] = False
     employee: UserOut
     class Config:
         from_attributes = True
@@ -154,6 +165,11 @@ def seed_initial_users():
             db.User(email="marie.curie@sat.fr", full_name="Marie Curie", role="employee"),
         ]
         session.add_all(users)
+        session.commit()
+        # Démo : Jean Dupont est le manager de Marie Curie
+        jean = session.query(db.User).filter(db.User.email == "jean.dupont@sat.fr").first()
+        marie = session.query(db.User).filter(db.User.email == "marie.curie@sat.fr").first()
+        marie.manager_id = jean.id
         session.commit()
     session.close()
 
@@ -189,8 +205,11 @@ def login(req: LoginRequest, session: Session = Depends(get_db)):
     return user
 
 @app.get("/api/users", response_model=List[UserOut])
-def get_users(session: Session = Depends(get_db)):
-    return session.query(db.User).order_by(db.User.full_name.asc()).all()
+def get_users(manager_id: Optional[int] = None, session: Session = Depends(get_db)):
+    query = session.query(db.User)
+    if manager_id:
+        query = query.filter(db.User.manager_id == manager_id)
+    return query.order_by(db.User.full_name.asc()).all()
 
 @app.post("/api/users", response_model=UserOut)
 def create_user(req: UserCreate, session: Session = Depends(get_db)):
@@ -209,6 +228,31 @@ def create_user(req: UserCreate, session: Session = Depends(get_db)):
     session.commit()
     session.refresh(new_user)
     return new_user
+
+@app.patch("/api/users/{user_id}/manager", response_model=UserOut)
+def update_manager(user_id: int, req: ManagerUpdate, session: Session = Depends(get_db)):
+    user = session.query(db.User).filter(db.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Utilisateur introuvable.")
+    manager = None
+    if req.manager_id is not None:
+        manager = session.query(db.User).filter(db.User.id == req.manager_id).first()
+        if not manager:
+            raise HTTPException(status_code=404, detail="Manager introuvable.")
+        if manager.id == user.id:
+            raise HTTPException(status_code=400, detail="Un collaborateur ne peut pas être son propre manager.")
+        if manager.manager_id == user.id:
+            raise HTTPException(status_code=400, detail="Ce manager est déjà un collaborateur de cette personne.")
+    user.manager_id = manager.id if manager else None
+    # Les demandes encore en attente suivent le nouveau circuit de validation
+    for l in user.leaves:
+        if l.status == "pending":
+            l.manager_id = manager.id if manager else None
+            l.manager_name = manager.full_name if manager else None
+            l.rh_seen = manager is None
+    session.commit()
+    session.refresh(user)
+    return user
 
 @app.patch("/api/users/{user_id}/rights", response_model=UserOut)
 def update_rights(user_id: int, req: RightsUpdate, session: Session = Depends(get_db)):
@@ -233,6 +277,11 @@ def delete_user(user_id: int, session: Session = Depends(get_db)):
     if user.role == "admin":
         raise HTTPException(status_code=400, detail="Impossible de supprimer un compte administrateur.")
     
+    # Son équipe n'a plus de manager ; ses demandes en cours repassent à la RH
+    session.query(db.User).filter(db.User.manager_id == user_id).update({db.User.manager_id: None})
+    session.query(db.LeaveRequest).filter(
+        db.LeaveRequest.manager_id == user_id, db.LeaveRequest.status == "pending"
+    ).update({db.LeaveRequest.manager_id: None, db.LeaveRequest.manager_name: None, db.LeaveRequest.rh_seen: True})
     session.query(db.LeaveRequest).filter(db.LeaveRequest.user_id == user_id).delete()
     session.delete(user)
     session.commit()
@@ -279,6 +328,9 @@ def create_leave(req: LeaveCreate, session: Session = Depends(get_db)):
         end_half_day=req.end_half_day,
         days_count=days,
         saturdays_count=details["saturdays_count"],
+        manager_id=user.manager.id if user.manager else None,
+        manager_name=user.manager.full_name if user.manager else None,
+        rh_seen=user.manager is None,
         leave_type=req.leave_type,
         employee_comment=req.employee_comment
     )
@@ -303,19 +355,42 @@ def create_leave(req: LeaveCreate, session: Session = Depends(get_db)):
             {holidays_txt}
             <li><strong>Motif :</strong> {req.employee_comment or 'Non précisé'}</li>
         </ul>
-        <p>Rendez-vous sur votre portail RH SAT pour valider ou refuser cette demande.</p>
+        <p><<CLOSING>></p>
     </div>
     """
-    send_email_notification("rh@sat.fr", f"[SAT Congés] Nouvelle demande - {user.full_name}", html)
+    if user.manager:
+        # Le manager valide ; la RH est simplement informée
+        send_email_notification(
+            user.manager.email, f"[SAT Congés] Demande à valider - {user.full_name}",
+            html.replace("<<CLOSING>>", "Rendez-vous sur le portail SAT (onglet Équipe) pour valider ou refuser cette demande."))
+        send_email_notification(
+            "rh@sat.fr", f"[SAT Congés] Info : demande de {user.full_name} transmise à son manager",
+            html.replace("<<CLOSING>>", f"Cette demande est validée par son manager, {user.manager.full_name}. Vous êtes simplement informé(e)."))
+    else:
+        send_email_notification(
+            "rh@sat.fr", f"[SAT Congés] Nouvelle demande - {user.full_name}",
+            html.replace("<<CLOSING>>", "Rendez-vous sur votre portail RH SAT pour valider ou refuser cette demande."))
     
     return new_leave
 
 @app.get("/api/leaves", response_model=List[LeaveOut])
-def get_leaves(user_id: Optional[int] = None, session: Session = Depends(get_db)):
+def get_leaves(user_id: Optional[int] = None, manager_id: Optional[int] = None, session: Session = Depends(get_db)):
     query = session.query(db.LeaveRequest)
     if user_id:
         query = query.filter(db.LeaveRequest.user_id == user_id)
+    if manager_id:
+        query = query.filter(db.LeaveRequest.manager_id == manager_id)
     return query.order_by(db.LeaveRequest.created_at.desc()).all()
+
+@app.patch("/api/leaves/{leave_id}/seen", response_model=LeaveOut)
+def mark_leave_seen(leave_id: int, session: Session = Depends(get_db)):
+    leave = session.query(db.LeaveRequest).filter(db.LeaveRequest.id == leave_id).first()
+    if not leave:
+        raise HTTPException(status_code=404, detail="Demande introuvable.")
+    leave.rh_seen = True
+    session.commit()
+    session.refresh(leave)
+    return leave
 
 @app.patch("/api/leaves/{leave_id}/status", response_model=LeaveOut)
 def update_leave_status(leave_id: int, req: LeaveStatusUpdate, session: Session = Depends(get_db)):
@@ -326,8 +401,22 @@ def update_leave_status(leave_id: int, req: LeaveStatusUpdate, session: Session 
     if req.status not in ["approved", "rejected"]:
         raise HTTPException(status_code=400, detail="Statut invalide.")
 
+    # Qui a le droit de décider : la RH, ou le manager de l'employé pour cette demande
+    actor = session.query(db.User).filter(db.User.id == req.decided_by_id).first()
+    if not actor:
+        raise HTTPException(status_code=400, detail="Décideur introuvable.")
+    by_rh = actor.role == "admin"
+    if not by_rh and not (leave.manager_id is not None and actor.id == leave.manager_id):
+        raise HTTPException(status_code=403, detail="Vous n'êtes pas autorisé(e) à décider de cette demande.")
+    if leave.status != "pending":
+        raise HTTPException(status_code=400, detail="Cette demande a déjà été traitée.")
+
     leave.status = req.status
     leave.admin_comment = req.admin_comment
+    leave.decided_by_id = actor.id
+    leave.decided_by_name = actor.full_name
+    # Décision d'un manager -> notification pour la RH (non lue) ; décision de la RH -> rien à notifier
+    leave.rh_seen = True if (by_rh or leave.manager_id is None) else False
     session.commit()
     session.refresh(leave)
 
@@ -337,11 +426,16 @@ def update_leave_status(leave_id: int, req: LeaveStatusUpdate, session: Session 
     <div style="font-family: sans-serif; color: #1e293b;">
         <h2 style="color: {color};">Votre demande de congés a été {decision_fr}</h2>
         <p>Bonjour <strong>{leave.employee.full_name}</strong>,</p>
-        <p>Votre demande de <strong>{leave.leave_type}</strong> du {leave.start_date} au {leave.end_date} ({leave.days_count} jour(s)) a été traitée par le service RH.</p>
-        <p><strong>Commentaire RH :</strong> {req.admin_comment or 'Aucun commentaire'}</p>
+        <p>Votre demande de <strong>{leave.leave_type}</strong> du {leave.start_date} au {leave.end_date} ({leave.days_count} jour(s)) a été traitée par {actor.full_name}.</p>
+        <p><strong>Commentaire :</strong> {req.admin_comment or 'Aucun commentaire'}</p>
     </div>
     """
     send_email_notification(leave.employee.email, f"[SAT Congés] Demande {decision_fr}", html)
+    if not by_rh:
+        send_email_notification(
+            "rh@sat.fr", f"[SAT Congés] Info : {actor.full_name} a traité la demande de {leave.employee.full_name}",
+            f"<p>{actor.full_name} a {decision_fr} la demande de {leave.leave_type} de <strong>{leave.employee.full_name}</strong> "
+            f"du {leave.start_date} au {leave.end_date} ({leave.days_count} jour(s)).</p>")
     return leave
 
 import os

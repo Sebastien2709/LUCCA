@@ -1,10 +1,1741 @@
-import { StrictMode } from 'react'
-import { createRoot } from 'react-dom/client'
-import './index.css'
-import App from './App.jsx'
+import React, { useState, useEffect } from "react";
+import {
+  CalendarDays,
+  CheckCircle2,
+  XCircle,
+  LogOut,
+  Send,
+  Building2,
+  Users,
+  ChevronLeft,
+  ChevronRight,
+  Plus,
+  Trash2,
+  Check,
+  Eye,
+  Hourglass,
+  Mail,
+  Download,
+  X,
+  Search,
+  ChevronDown,
+} from "lucide-react";
 
-createRoot(document.getElementById('root')).render(
-  <StrictMode>
-    <App />
-  </StrictMode>,
-)
+const API_URL = "https://sat-conges-backend.onrender.com/api";
+
+// Palette inspirée de Lucca
+const NAVY = "#1b1f5e";
+const PURPLE = "#6b4fd8";
+const PAGE_BG = "#f3f5fd";
+const WEEKEND_BG = "#e3e7f8";
+const HOLIDAY_BG = "#d9d4f7";
+const SELECT_COLOR = "#f59e0b";
+
+// Couleur par type d'absence (vue RH + employé)
+const TYPE_STYLES = {
+  "Congés Payés (CP)": { color: "#6b4fd8", label: "Congés payés" },
+  RTT: { color: "#0ea5e9", label: "RTT" },
+  Télétravail: { color: "#10b981", label: "Télétravail" },
+  "Arrêt Maladie": { color: "#ef4444", label: "Arrêt maladie" },
+  "Congé Sans Solde": { color: "#64748b", label: "Sans solde" },
+  "Événement familial": { color: "#ec4899", label: "Événement familial" },
+};
+const typeColor = (t) => (TYPE_STYLES[t] ? TYPE_STYLES[t].color : PURPLE);
+
+// Validé = couleur pleine ; en attente = couleur hachurée
+const leaveCellStyle = (leave) => {
+  const c = typeColor(leave.leave_type);
+  if (leave.status === "approved") return { backgroundColor: c };
+  return {
+    backgroundColor: `${c}26`,
+    backgroundImage: `repeating-linear-gradient(135deg, ${c} 0 2px, transparent 2px 5px)`,
+  };
+};
+
+const hatchStyle = {
+  backgroundImage:
+    "repeating-linear-gradient(135deg, rgba(107,79,216,0.28) 0 2px, transparent 2px 5px)",
+};
+
+// ---------- Helpers de dates ----------
+const formatYMD = (d) => {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+};
+const fmtFR = (s) => (s ? s.split("-").reverse().join("/") : "");
+const addDays = (d, n) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + n);
+const mondayOf = (d) => {
+  const x = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  x.setDate(x.getDate() - ((x.getDay() + 6) % 7));
+  return x;
+};
+const isoWeek = (d) => {
+  const t = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+  const dayNum = t.getUTCDay() || 7;
+  t.setUTCDate(t.getUTCDate() + 4 - dayNum);
+  const yearStart = new Date(Date.UTC(t.getUTCFullYear(), 0, 1));
+  return Math.ceil(((t - yearStart) / 86400000 + 1) / 7);
+};
+const getDaysInMonth = (dateObj) => {
+  const year = dateObj.getFullYear();
+  const month = dateObj.getMonth();
+  const firstDay = new Date(year, month, 1);
+  const lastDay = new Date(year, month + 1, 0);
+  const startOffset = (firstDay.getDay() + 6) % 7; // Lundi en premier
+  const days = [];
+  for (let i = 0; i < startOffset; i++) days.push(null);
+  for (let d = 1; d <= lastDay.getDate(); d++) days.push(new Date(year, month, d));
+  return days;
+};
+// Recherche insensible aux accents et à la casse ("jose" trouve "José")
+const normalize = (s) => (s || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+// Exercice de congés SAT : du 1er mai au 30 avril
+const exerciseStart = (d = new Date()) => (d.getMonth() >= 4 ? d.getFullYear() : d.getFullYear() - 1);
+const inExercise = (dateStr, startYear) => dateStr >= `${startYear}-05-01` && dateStr < `${startYear + 1}-05-01`;
+const halfLabel = (h) => (h === "morning" ? "matin" : "après-midi");
+
+export default function App() {
+  const [user, setUser] = useState(null);
+  const [emailInput, setEmailInput] = useState("");
+  const [loginError, setLoginError] = useState("");
+
+  const [leaves, setLeaves] = useState([]);
+  const [employees, setEmployees] = useState([]);
+  const [holidaysMap, setHolidaysMap] = useState({});
+  const [previewData, setPreviewData] = useState({ days_count: 0, holidays: [] });
+
+  // Navigation : "calendar" | "request" | "planning" | "approval" | "employees" | "exports"
+  const [view, setView] = useState("calendar");
+
+  // Calendrier (4 mois affichés)
+  const [calStart, setCalStart] = useState(
+    new Date(new Date().getFullYear(), new Date().getMonth(), 1)
+  );
+  // Planning (6 semaines à partir d'un lundi)
+  const [planStart, setPlanStart] = useState(mondayOf(new Date()));
+
+  // Approbation
+  const [adminTab, setAdminTab] = useState("todo");
+  const [selectedId, setSelectedId] = useState(null);
+  const [adminComments, setAdminComments] = useState({});
+
+  // Création employé
+  const [newEmpName, setNewEmpName] = useState("");
+  const [newEmpEmail, setNewEmpEmail] = useState("");
+  const [empMsg, setEmpMsg] = useState("");
+  const [rightsDraft, setRightsDraft] = useState({}); // droits en cours de saisie par la RH
+  const [rightsMsg, setRightsMsg] = useState({ id: null, text: "" });
+  const [empSearch, setEmpSearch] = useState("");
+  const [openEmpId, setOpenEmpId] = useState(null);
+  const [histScope, setHistScope] = useState("current"); // "current" | "all"
+  const [team, setTeam] = useState([]);              // collaborateurs dont l'utilisateur est le manager
+  const [teamLeaves, setTeamLeaves] = useState([]);  // demandes de son équipe
+  const [overrideId, setOverrideId] = useState(null); // RH qui décide à la place d'un manager
+
+  // Sélection de dates + demande
+  const [startDate, setStartDate] = useState("");
+  const [startHalf, setStartHalf] = useState("morning");
+  const [endDate, setEndDate] = useState("");
+  const [endHalf, setEndHalf] = useState("afternoon");
+  const [leaveType, setLeaveType] = useState("Congés Payés (CP)");
+  const [employeeComment, setEmployeeComment] = useState("");
+  const [formMessage, setFormMessage] = useState({ type: "", text: "" });
+  const [showModal, setShowModal] = useState(false);
+
+  useEffect(() => {
+    if (user) {
+      fetchLeaves();
+      fetchHolidays();
+      if (user.role === "admin") fetchEmployees();
+      if (user.is_manager) fetchTeam();
+      setView(user.role === "admin" ? "approval" : "calendar");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user]);
+
+  // Aperçu du décompte via le backend
+  useEffect(() => {
+    if (!startDate || !endDate || endDate < startDate) {
+      setPreviewData({ days_count: 0, holidays: [] });
+      return;
+    }
+    const run = async () => {
+      try {
+        const params = new URLSearchParams({
+          start_date: startDate,
+          end_date: endDate,
+          start_half_day: startHalf,
+          end_half_day: endHalf,
+          leave_type: leaveType,
+          ...(user ? { user_id: user.id } : {}),
+        });
+        const res = await fetch(`${API_URL}/leaves/preview?${params}`);
+        if (res.ok) setPreviewData(await res.json());
+      } catch (err) {
+        console.error(err);
+      }
+    };
+    run();
+  }, [startDate, endDate, startHalf, endHalf, leaveType, user?.id]);
+
+  // Le message de succès disparaît tout seul
+  useEffect(() => {
+    if (formMessage.type === "success") {
+      const t = setTimeout(() => setFormMessage({ type: "", text: "" }), 6000);
+      return () => clearTimeout(t);
+    }
+  }, [formMessage]);
+
+  const fetchHolidays = async () => {
+    try {
+      const res = await fetch(`${API_URL}/holidays`);
+      setHolidaysMap(await res.json());
+    } catch (err) {
+      console.error("Erreur chargement jours fériés", err);
+    }
+  };
+
+  const fetchLeaves = async () => {
+    try {
+      const url =
+        user.role === "admin"
+          ? `${API_URL}/leaves`
+          : `${API_URL}/leaves?user_id=${user.id}`;
+      const res = await fetch(url);
+      setLeaves(await res.json());
+    } catch (err) {
+      console.error("Erreur lors du chargement des congés", err);
+    }
+  };
+
+  const fetchTeam = async () => {
+    try {
+      const [u, l] = await Promise.all([
+        fetch(`${API_URL}/users?manager_id=${user.id}`).then((r) => r.json()),
+        fetch(`${API_URL}/leaves?manager_id=${user.id}`).then((r) => r.json()),
+      ]);
+      setTeam(u);
+      setTeamLeaves(l);
+    } catch (err) {
+      console.error("Erreur chargement équipe", err);
+    }
+  };
+
+  const fetchEmployees = async () => {
+    try {
+      const res = await fetch(`${API_URL}/users`);
+      setEmployees(await res.json());
+    } catch (err) {
+      console.error("Erreur chargement employés", err);
+    }
+  };
+
+  // ---------- Connexion ----------
+const handleLogin = async (e, quickEmail = null) => {
+if (e) e.preventDefault();
+setLoginError("");
+const targetEmail = quickEmail || emailInput;
+
+try {
+  const res = await fetch(`${API_URL}/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email: targetEmail }),
+  });
+
+  if (!res.ok) {
+    const errorText = await res.text(); // Lit la réponse brute même si elle est vide
+    console.error(`Erreur serveur (${res.status}) :`, errorText);
+    throw new Error(`Le serveur a refusé la connexion (Code ${res.status}). Regarde les logs Render.`);
+  }
+
+  const userData = await res.json();
+  setUser(userData);
+  setEmailInput("");
+} catch (err) {
+  setLoginError(err.message);
+}
+};
+
+  // ---------- Collaborateurs ----------
+  const handleAddEmployee = async (e) => {
+    e.preventDefault();
+    setEmpMsg("");
+    try {
+      const res = await fetch(`${API_URL}/users`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ full_name: newEmpName, email: newEmpEmail, role: "employee" }),
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.detail || "Erreur lors de l'ajout");
+      }
+      setNewEmpName("");
+      setNewEmpEmail("");
+      setEmpMsg("✅ Collaborateur ajouté avec succès !");
+      fetchEmployees();
+    } catch (err) {
+      setEmpMsg(`❌ ${err.message}`);
+    }
+  };
+
+  const handleDeleteEmployee = async (id, name) => {
+    if (!window.confirm(`Supprimer le collaborateur ${name} et son historique ?`)) return;
+    try {
+      const res = await fetch(`${API_URL}/users/${id}`, { method: "DELETE" });
+      if (res.ok) {
+        fetchEmployees();
+        fetchLeaves();
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  // ---------- Sélection sur le calendrier ----------
+  const handleMarkSeen = async (leaveId) => {
+    try {
+      await fetch(`${API_URL}/leaves/${leaveId}/seen`, { method: "PATCH" });
+      fetchLeaves();
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleSetManager = async (emp, value) => {
+    try {
+      const res = await fetch(`${API_URL}/users/${emp.id}/manager`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ manager_id: value === "" ? null : Number(value) }),
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        alert(errData.detail || "Erreur lors du changement de manager");
+        return;
+      }
+      fetchEmployees();
+      fetchLeaves();
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleSaveRights = async (emp) => {
+    const d = rightsDraft[emp.id];
+    if (!d) return;
+    const body = {};
+    ["droits_cp", "droits_fractionnement", "droits_rtt"].forEach((k) => {
+      if (d[k] !== undefined && d[k] !== "") body[k] = parseFloat(String(d[k]).replace(",", "."));
+    });
+    try {
+      const res = await fetch(`${API_URL}/users/${emp.id}/rights`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error("Valeur invalide : saisis un nombre entre 0 et 100.");
+      const copy = { ...rightsDraft };
+      delete copy[emp.id];
+      setRightsDraft(copy);
+      setRightsMsg({ id: emp.id, text: "Droits enregistrés ✓" });
+      fetchEmployees();
+    } catch (err) {
+      setRightsMsg({ id: emp.id, text: err.message });
+    }
+  };
+
+  const handleDayClick = (d) => {
+    const key = formatYMD(d);
+    const dow = d.getDay();
+    if (dow === 0 || dow === 6 || holidaysMap[key]) return;
+    if (!startDate || (startDate && endDate)) {
+      setStartDate(key);
+      setEndDate("");
+    } else if (key < startDate) {
+      setStartDate(key);
+    } else {
+      setEndDate(key);
+    }
+  };
+
+  const resetSelection = () => {
+    setStartDate("");
+    setEndDate("");
+    setStartHalf("morning");
+    setEndHalf("afternoon");
+    setEmployeeComment("");
+  };
+
+  // ---------- Envoi de la demande ----------
+  const handleCreateLeave = async (e) => {
+    e.preventDefault();
+    setFormMessage({ type: "", text: "" });
+    try {
+      const res = await fetch(`${API_URL}/leaves`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          user_id: user.id,
+          start_date: startDate,
+          start_half_day: startHalf,
+          end_date: endDate,
+          end_half_day: endHalf,
+          leave_type: leaveType,
+          employee_comment: employeeComment,
+        }),
+      });
+      if (!res.ok) {
+        const errData = await res.json();
+        throw new Error(errData.detail || "Erreur lors de l'envoi");
+      }
+      const created = await res.json();
+      setShowModal(false);
+      resetSelection();
+      setFormMessage({
+        type: "success",
+        text: created.manager_name
+          ? `Demande envoyée à ton manager ${created.manager_name} ! La RH en est informée.`
+          : "Demande envoyée ! La RH a été notifiée par email.",
+      });
+      fetchLeaves();
+      // Met à jour les soldes affichés (calculés par le serveur)
+      const me = await fetch(`${API_URL}/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: user.email }),
+      });
+      if (me.ok) setUser(await me.json());
+    } catch (err) {
+      setFormMessage({ type: "error", text: err.message });
+    }
+  };
+
+  // ---------- Validation / refus ----------
+  const handleUpdateStatus = async (leaveId, newStatus) => {
+    try {
+      const res = await fetch(`${API_URL}/leaves/${leaveId}/status`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          status: newStatus,
+          admin_comment: adminComments[leaveId] || "",
+          decided_by_id: user.id,
+        }),
+      });
+      if (res.ok) {
+        setSelectedId(null);
+        setOverrideId(null);
+        fetchLeaves();
+        if (user.role === "admin") fetchEmployees();
+        if (user.is_manager) fetchTeam();
+      } else {
+        const errData = await res.json().catch(() => ({}));
+        alert(errData.detail || "Erreur lors de la décision");
+      }
+    } catch (err) {
+      console.error("Erreur lors de la mise à jour", err);
+    }
+  };
+
+  // ---------- Export CSV ----------
+  const exportToCSV = () => {
+    const headers = [
+      "ID", "Employe", "Email", "Type de conge", "Date Debut", "Demi-journee Debut",
+      "Date Fin", "Demi-journee Fin", "Jours Ouvres", "Statut", "Commentaire Employe", "Commentaire RH",
+    ];
+    const rows = leaves.map((l) => [
+      l.id,
+      `"${l.employee.full_name}"`,
+      l.employee.email,
+      `"${l.leave_type}"`,
+      l.start_date,
+      l.start_half_day === "morning" ? "Matin" : "Apres-midi",
+      l.end_date,
+      l.end_half_day === "morning" ? "Matin" : "Apres-midi",
+      String(l.days_count).replace(".", ","),
+      l.status === "approved" ? "Valide" : l.status === "rejected" ? "Refuse" : "En attente",
+      `"${l.employee_comment || ""}"`,
+      `"${l.admin_comment || ""}"`,
+    ]);
+    const csvContent =
+      "\uFEFF" + [headers.join(";"), ...rows.map((r) => r.join(";"))].join("\n");
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.setAttribute("download", `SAT_Conges_${new Date().toISOString().slice(0, 10)}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  // =========================================================================
+  // ÉCRAN DE CONNEXION
+  // =========================================================================
+  if (!user) {
+    return (
+      <div
+        className="min-h-screen w-full flex items-center justify-center p-4"
+        style={{ background: `linear-gradient(135deg, ${NAVY}, ${PURPLE})` }}
+      >
+        <div className="max-w-md w-full bg-white rounded-2xl shadow-2xl p-8">
+          <div
+            className="flex items-center justify-center w-14 h-14 text-white rounded-2xl mb-6 mx-auto"
+            style={{ backgroundColor: PURPLE }}
+          >
+            <Building2 className="w-8 h-8" />
+          </div>
+          <h1 className="text-2xl font-bold text-center" style={{ color: NAVY }}>
+            SAT • Espace Congés
+          </h1>
+          <p className="text-center text-slate-500 text-sm mt-1 mb-8">
+            Connectez-vous avec votre adresse email professionnelle
+          </p>
+
+          <form onSubmit={handleLogin} className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-1">
+                Email professionnel
+              </label>
+              <input
+                type="email"
+                required
+                placeholder="prenom.nom@sat.fr"
+                value={emailInput}
+                onChange={(e) => setEmailInput(e.target.value)}
+                className="w-full px-4 py-2.5 rounded-lg border border-slate-300 focus:ring-2 focus:ring-[#6b4fd8] outline-none"
+              />
+            </div>
+            {loginError && (
+              <div className="p-3 rounded-lg bg-rose-50 border border-rose-200 text-rose-700 text-sm">
+                {loginError}
+              </div>
+            )}
+            <button
+              type="submit"
+              className="w-full py-3 text-white font-semibold rounded-lg transition cursor-pointer hover:opacity-90"
+              style={{ backgroundColor: PURPLE }}
+            >
+              Accéder à mon espace
+            </button>
+          </form>
+
+          {/* ⚠️ À SUPPRIMER avant toute mise en production */}
+          <div className="mt-8 pt-6 border-t border-slate-100">
+            <p className="text-xs font-semibold uppercase tracking-wider text-slate-400 text-center mb-3">
+              Accès rapide (démo — à retirer en production)
+            </p>
+            <div className="grid gap-2">
+              {[
+                ["rh@sat.fr", "👩‍💼 RH / Compta (admin)"],
+                ["jean.dupont@sat.fr", "👷 Jean Dupont (employé)"],
+                ["marie.curie@sat.fr", "👩‍🔬 Marie Curie (employée)"],
+              ].map(([mail, label]) => (
+                <button
+                  key={mail}
+                  onClick={() => handleLogin(null, mail)}
+                  className="text-xs py-2 px-3 bg-slate-100 hover:bg-[#ece8fb] text-slate-700 rounded-lg font-medium transition flex items-center justify-between cursor-pointer"
+                >
+                  <span>{label}</span>
+                  <span className="text-slate-400">{mail}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // =========================================================================
+  // DONNÉES DÉRIVÉES
+  // =========================================================================
+  const isAdmin = user.role === "admin";
+  // RH : seules les demandes SANS manager sont à traiter ; les autres sont de simples notifications
+  const pendingLeaves = leaves.filter((l) => l.status === "pending" && !l.manager_id);
+  const doneLeaves = leaves.filter((l) => l.status !== "pending" && !l.manager_id);
+  const notifLeaves = leaves
+    .filter((l) => l.manager_id)
+    .sort((a, b) => (a.rh_seen === b.rh_seen ? (a.created_at < b.created_at ? 1 : -1) : a.rh_seen ? 1 : -1));
+  const unseenCount = notifLeaves.filter((l) => !l.rh_seen).length;
+  const pendingCount = pendingLeaves.length;
+  // Manager : demandes de son équipe
+  const teamPending = teamLeaves.filter((l) => l.status === "pending");
+  const teamDone = teamLeaves.filter((l) => l.status !== "pending");
+  const planLeaves = isAdmin ? leaves : [...leaves, ...teamLeaves];
+  const today = new Date();
+  const todayKey = formatYMD(today);
+
+  const nav = isAdmin
+    ? [
+        { key: "approval", label: "Approbation", icon: Check, badge: pendingCount + unseenCount },
+        { key: "planning", label: "Planning", icon: Eye },
+        { key: "employees", label: "Collaborateurs", icon: Users },
+        { key: "exports", label: "Exports", icon: Download },
+      ]
+    : [
+        { key: "calendar", label: "Mon calendrier", icon: CalendarDays },
+        { key: "request", label: "Demande", icon: Send },
+        { key: "planning", label: "Planning", icon: Eye },
+        ...(user.is_manager ? [{ key: "team", label: "Équipe", icon: Users, badge: teamPending.length }] : []),
+      ];
+
+  // Congé d'un utilisateur à une date (hors week-end / férié / refusé)
+  const leaveOnDay = (userId, d) => {
+    const dow = d.getDay();
+    if (dow === 0 || dow === 6) return null;
+    const key = formatYMD(d);
+    if (holidaysMap[key]) return null;
+    return (
+      planLeaves.find(
+        (l) =>
+          l.user_id === userId &&
+          l.status !== "rejected" &&
+          l.start_date <= key &&
+          l.end_date >= key
+      ) || null
+    );
+  };
+
+  const renderStatusPill = (status) => {
+    if (status === "approved")
+      return (
+        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800">
+          <CheckCircle2 className="w-3.5 h-3.5" /> Validé
+        </span>
+      );
+    if (status === "rejected")
+      return (
+        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-rose-100 text-rose-800">
+          <XCircle className="w-3.5 h-3.5" /> Refusé
+        </span>
+      );
+    return (
+      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-800">
+        <Hourglass className="w-3.5 h-3.5" /> En attente
+      </span>
+    );
+  };
+
+  const TypeDot = ({ type }) => (
+    <span
+      className="w-2.5 h-2.5 rounded-full inline-block shrink-0"
+      style={{ backgroundColor: typeColor(type) }}
+    />
+  );
+
+  const renderLegend = () => (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-slate-600">
+      {Object.entries(TYPE_STYLES).map(([key, s]) => (
+        <span key={key} className="flex items-center gap-1.5">
+          <span className="w-3.5 h-3.5 rounded-full inline-block" style={{ backgroundColor: s.color }} />
+          {s.label}
+        </span>
+      ))}
+      <span className="flex items-center gap-1.5">
+        <span
+          className="w-3.5 h-3.5 rounded-full inline-block border border-slate-400"
+          style={{
+            backgroundImage:
+              "repeating-linear-gradient(135deg, #64748b 0 2px, transparent 2px 5px)",
+          }}
+        />
+        Hachuré = en attente
+      </span>
+      <span className="flex items-center gap-1.5">
+        <span className="w-3.5 h-3.5 rounded-full inline-block" style={{ backgroundColor: HOLIDAY_BG }} /> Férié
+      </span>
+      <span className="flex items-center gap-1.5">
+        <span className="w-3.5 h-3.5 rounded-full inline-block" style={{ backgroundColor: WEEKEND_BG, ...hatchStyle }} />
+        Week-end
+      </span>
+    </div>
+  );
+
+  // =========================================================================
+  // GRILLE CALENDRIER (4 mois) — cliquable ou non
+  // =========================================================================
+  const renderCalendarGrid = (selectable) => {
+    const months = [0, 1, 2, 3].map(
+      (i) => new Date(calStart.getFullYear(), calStart.getMonth() + i, 1)
+    );
+    const lastSelKey = endDate || startDate;
+
+    return (
+      <div className="space-y-4">
+        <div className="flex flex-wrap items-center gap-3 bg-[#e8ebf8] p-3 rounded-xl">
+          <div className="flex bg-white rounded-lg border border-slate-200 overflow-hidden">
+            <button
+              onClick={() => setCalStart(new Date(calStart.getFullYear(), calStart.getMonth() - 1, 1))}
+              className="px-3 py-2 hover:bg-slate-50 cursor-pointer"
+            >
+              <ChevronLeft className="w-4 h-4" />
+            </button>
+            <button
+              onClick={() => setCalStart(new Date(calStart.getFullYear(), calStart.getMonth() + 1, 1))}
+              className="px-3 py-2 border-l border-slate-200 hover:bg-slate-50 cursor-pointer"
+            >
+              <ChevronRight className="w-4 h-4" />
+            </button>
+          </div>
+          <button
+            onClick={() => setCalStart(new Date(today.getFullYear(), today.getMonth(), 1))}
+            className="px-4 py-2 bg-white rounded-lg border border-slate-200 text-sm font-semibold hover:bg-slate-50 cursor-pointer"
+          >
+            Aujourd'hui
+          </button>
+          <div className="ml-auto">{renderLegend()}</div>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 2xl:grid-cols-4 gap-4">
+          {months.map((m) => {
+            const lastDom = new Date(m.getFullYear(), m.getMonth() + 1, 0).getDate();
+            return (
+              <div key={m.toISOString()} className="bg-white rounded-xl border border-slate-200 p-4">
+                <h3 className="font-bold capitalize mb-3" style={{ color: NAVY }}>
+                  {m.toLocaleDateString("fr-FR", { month: "long", year: "numeric" })}
+                </h3>
+                <div className="grid grid-cols-7 text-center text-[11px] text-slate-500 mb-1">
+                  {["lun.", "mar.", "mer.", "jeu.", "ven.", "sam.", "dim."].map((d) => (
+                    <div key={d}>{d}</div>
+                  ))}
+                </div>
+                <div className="grid grid-cols-7">
+                  {getDaysInMonth(m).map((d, i) => {
+                    if (!d) return <div key={`e-${i}`} className="h-10" />;
+                    const key = formatYMD(d);
+                    const dow = d.getDay();
+                    const weekend = dow === 0 || dow === 6;
+                    const holiday = holidaysMap[key];
+                    const lv = leaveOnDay(user.id, d);
+                    const isToday = key === todayKey;
+                    const blocked = weekend || !!holiday;
+
+                    const inSel =
+                      selectable &&
+                      startDate &&
+                      key >= startDate &&
+                      key <= (endDate || startDate);
+                    const roundL = inSel && (key === startDate || dow === 1 || d.getDate() === 1);
+                    const roundR = inSel && (key === lastSelKey || dow === 0 || d.getDate() === lastDom);
+
+                    let cls = "text-slate-700";
+                    let style = {};
+                    let title = "";
+                    if (inSel && !blocked) {
+                      cls = "text-white font-bold";
+                    } else if (weekend) {
+                      cls = "text-slate-400";
+                      style = { backgroundColor: WEEKEND_BG, ...hatchStyle };
+                    } else if (holiday) {
+                      cls = "text-[#3b2a8f] font-semibold";
+                      style = { backgroundColor: HOLIDAY_BG };
+                      title = holiday;
+                    } else if (lv) {
+                      cls = lv.status === "approved" ? "text-white font-semibold" : "text-slate-900 font-semibold";
+                      style = leaveCellStyle(lv);
+                      title = `${lv.leave_type} (${lv.status === "approved" ? "validé" : "en attente"})`;
+                    }
+
+                    let content = d.getDate();
+                    if (inSel && !blocked) {
+                      if (key === startDate) content = "🙂";
+                      else if (endDate && key === endDate) content = "🙁";
+                    }
+
+                    return (
+                      <div
+                        key={key}
+                        className={`h-10 flex items-center justify-center ${
+                          inSel ? `${roundL ? "rounded-l-full" : ""} ${roundR ? "rounded-r-full" : ""}` : ""
+                        }`}
+                        style={inSel ? { backgroundColor: SELECT_COLOR } : {}}
+                      >
+                        <button
+                          type="button"
+                          disabled={!selectable || blocked}
+                          onClick={() => handleDayClick(d)}
+                          title={title}
+                          className={`w-8 h-8 rounded-full flex items-center justify-center text-sm ${cls} ${
+                            isToday ? "ring-2 ring-slate-900" : ""
+                          } ${
+                            selectable && !blocked && !inSel
+                              ? "cursor-pointer hover:ring-2 hover:ring-[#6b4fd8]/50"
+                              : ""
+                          }`}
+                          style={inSel && !blocked ? { backgroundColor: "transparent" } : style}
+                        >
+                          {content}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  };
+
+  // =========================================================================
+  // VUE : MON CALENDRIER (lecture seule + récap + historique)
+  // =========================================================================
+  const renderCalendar = () => {
+    const myLeaves = leaves.filter((l) => l.user_id === user.id);
+    const byType = {};
+    myLeaves
+      .filter((l) => l.status !== "rejected")
+      .forEach((l) => {
+        byType[l.leave_type] = byType[l.leave_type] || { approved: 0, pending: 0 };
+        byType[l.leave_type][l.status === "approved" ? "approved" : "pending"] += l.days_count;
+      });
+    const totalApproved = myLeaves
+      .filter((l) => l.status === "approved" && l.leave_type !== "Télétravail")
+      .reduce((s, l) => s + l.days_count, 0);
+
+    return (
+      <div className="space-y-6">
+        {formMessage.type === "success" && (
+          <div className="p-3 rounded-lg text-sm font-medium bg-emerald-50 text-emerald-800 border border-emerald-200">
+            {formMessage.text}
+          </div>
+        )}
+        {renderCalendarGrid(false)}
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="bg-white rounded-xl border border-slate-200 p-5 flex items-center gap-4">
+            <div className="w-12 h-12 rounded-xl flex items-center justify-center text-2xl bg-[#ece8fb]">🏖️</div>
+            <div>
+              <p className="text-sm text-slate-600">Solde Congés Payés (CP)</p>
+              <p className="text-2xl font-extrabold" style={{ color: NAVY }}>{user?.solde_cp} jour(s)</p>
+            </div>
+          </div>
+          
+          <div className="bg-white rounded-xl border border-slate-200 p-5 flex items-center gap-4">
+            <div className="w-12 h-12 rounded-xl flex items-center justify-center text-2xl bg-[#e0f2fe]">⏱️</div>
+            <div>
+              <p className="text-sm text-slate-600">Solde RTT</p>
+              <p className="text-2xl font-extrabold" style={{ color: NAVY }}>{user?.solde_rtt} jour(s)</p>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-xl border border-slate-200 p-5 flex items-center gap-4">
+            <div className="w-12 h-12 rounded-xl flex items-center justify-center text-2xl bg-[#f1f5f9]">📅</div>
+            <div>
+              <p className="text-sm text-slate-600">Absences validées</p>
+              <p className="text-2xl font-extrabold" style={{ color: NAVY }}>{totalApproved} jour(s)</p>
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <h2 className="text-xl font-extrabold mb-3" style={{ color: NAVY }}>Vos congés</h2>
+          <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+            <div className="grid grid-cols-12 px-5 py-3 bg-[#e8ebf8] text-sm text-slate-600">
+              <div className="col-span-6">Type</div>
+              <div className="col-span-3 text-right">Jours validés</div>
+              <div className="col-span-3 text-right">En attente</div>
+            </div>
+            {Object.keys(byType).length === 0 ? (
+              <p className="px-5 py-8 text-center text-sm text-slate-400">Aucun congé posé pour le moment.</p>
+            ) : (
+              Object.entries(byType).map(([type, v]) => (
+                <div key={type} className="grid grid-cols-12 px-5 py-4 border-t border-slate-100 items-center">
+                  <div className="col-span-6 flex items-center gap-3">
+                    <span className="w-1.5 h-8 rounded inline-block" style={{ backgroundColor: typeColor(type) }} />
+                    <span className="font-medium text-slate-800">{type}</span>
+                  </div>
+                  <div className="col-span-3 text-right tabular-nums">{v.approved.toFixed(2).replace(".", ",")}</div>
+                  <div className="col-span-3 text-right tabular-nums">{v.pending.toFixed(2).replace(".", ",")}</div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+
+        <div>
+          <h2 className="text-xl font-extrabold mb-3" style={{ color: NAVY }}>Mes demandes</h2>
+          <div className="bg-white rounded-xl border border-slate-200 divide-y divide-slate-100">
+            {myLeaves.length === 0 ? (
+              <p className="p-8 text-center text-sm text-slate-400">Aucune demande.</p>
+            ) : (
+              myLeaves.map((l) => (
+                <div key={l.id} className="p-4 flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <p className="font-semibold text-sm text-slate-900 flex items-center gap-2">
+                      <TypeDot type={l.leave_type} /> {l.leave_type}
+                    </p>
+                    <p className="text-xs text-slate-600">
+                      Du {fmtFR(l.start_date)} au {fmtFR(l.end_date)} ({l.days_count} jour(s))
+                    </p>
+                    {l.admin_comment && (
+                      <p className="text-xs text-slate-500 mt-1">Réponse RH : « {l.admin_comment} »</p>
+                    )}
+                  </div>
+                  {renderStatusPill(l.status)}
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // =========================================================================
+  // VUE : DEMANDE (calendrier cliquable + barre + pop-up)
+  // =========================================================================
+  const renderRequest = () => {
+    const canContinue = startDate && endDate && endDate >= startDate && previewData.days_count > 0;
+    return (
+      <div className="space-y-4">
+        {formMessage.type === "success" && (
+          <div className="p-3 rounded-lg text-sm font-medium bg-emerald-50 text-emerald-800 border border-emerald-200">
+            {formMessage.text}
+          </div>
+        )}
+
+        {renderCalendarGrid(true)}
+
+        {/* Barre de demande */}
+        <div className="bg-white rounded-xl border border-slate-200 p-4 flex flex-wrap items-center gap-3">
+          <div className="text-sm text-slate-600 mr-2">
+            {!startDate ? (
+              "Cliquez sur une date de début dans le calendrier."
+            ) : !endDate ? (
+              "Cliquez maintenant sur la date de fin."
+            ) : (
+              <>
+                <span className="text-2xl font-extrabold" style={{ color: NAVY }}>
+                  {previewData.days_count} jour(s)
+                </span>{" "}
+                décompté(s)
+                {previewData.holidays.length > 0 && (
+                  <span className="ml-2 text-xs text-[#3b2a8f]">
+                    🎉 {previewData.holidays.map((h) => h.name).join(", ")} non décompté(s)
+                  </span>
+                )}
+              </>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2 ml-auto flex-wrap">
+            <input
+              type="date"
+              value={startDate}
+              onChange={(e) => setStartDate(e.target.value)}
+              className="px-3 py-2 rounded-lg border border-slate-300 text-sm"
+            />
+            <select
+              value={startHalf}
+              onChange={(e) => setStartHalf(e.target.value)}
+              className="px-3 py-2 rounded-lg border border-slate-300 bg-white text-sm"
+            >
+              <option value="morning">Toute la journée</option>
+              <option value="afternoon">À partir de l'après-midi</option>
+            </select>
+            <span className="text-slate-400">→</span>
+            <input
+              type="date"
+              value={endDate}
+              onChange={(e) => setEndDate(e.target.value)}
+              className="px-3 py-2 rounded-lg border border-slate-300 text-sm"
+            />
+            <select
+              value={endHalf}
+              onChange={(e) => setEndHalf(e.target.value)}
+              className="px-3 py-2 rounded-lg border border-slate-300 bg-white text-sm"
+            >
+              <option value="afternoon">Toute la journée</option>
+              <option value="morning">Jusqu'à midi</option>
+            </select>
+            <button
+              disabled={!canContinue}
+              onClick={() => {
+                setFormMessage({ type: "", text: "" });
+                setShowModal(true);
+              }}
+              className="px-5 py-2.5 text-white text-sm font-semibold rounded-lg cursor-pointer hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
+              style={{ backgroundColor: PURPLE }}
+            >
+              Poursuivre ma demande
+            </button>
+            <button
+              onClick={resetSelection}
+              className="px-3 py-2.5 text-sm font-semibold text-slate-600 hover:text-slate-900 cursor-pointer"
+            >
+              Annuler
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // =========================================================================
+  // POP-UP : FINALISER LA DEMANDE
+  // =========================================================================
+  const renderModal = () => {
+    const overlap = leaves.some(
+      (l) =>
+        l.user_id === user.id &&
+        l.status !== "rejected" &&
+        l.start_date <= endDate &&
+        l.end_date >= startDate
+    );
+    return (
+      <div
+        className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4"
+        onClick={() => setShowModal(false)}
+      >
+        <form
+          onSubmit={handleCreateLeave}
+          onClick={(e) => e.stopPropagation()}
+          className="bg-white rounded-2xl shadow-2xl w-full max-w-lg p-6 space-y-4"
+        >
+          <div className="flex items-start justify-between">
+            <div>
+              <h2 className="text-xl font-extrabold" style={{ color: NAVY }}>Finaliser ma demande</h2>
+              <p className="text-sm text-slate-500">
+                Du {fmtFR(startDate)} ({startHalf === "morning" ? "dès le matin" : "à partir de l'après-midi"}) au{" "}
+                {fmtFR(endDate)} ({endHalf === "afternoon" ? "fin d'après-midi" : "midi"})
+              </p>
+            </div>
+            <button type="button" onClick={() => setShowModal(false)}
+              className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-lg cursor-pointer">
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+
+          <div className="p-4 rounded-lg bg-[#ece8fb] space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-medium" style={{ color: NAVY }}>Décompte</span>
+              <span className="text-xl font-extrabold" style={{ color: PURPLE }}>
+                {previewData.days_count} jour(s)
+              </span>
+            </div>
+            {previewData.holidays.length > 0 && (
+              <div className="text-xs bg-white/80 p-2 rounded-lg" style={{ color: NAVY }}>
+                🎉 <strong>Férié(s) non décompté(s) :</strong>{" "}
+                {previewData.holidays.map((h) => h.name).join(", ")}
+              </div>
+            )}
+          </div>
+
+          {overlap && (
+            <div className="text-xs p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-900">
+              ⚠️ Cette période chevauche une de vos demandes existantes.
+            </div>
+          )}
+
+          <div>
+            <label className="block text-xs font-semibold uppercase text-slate-600 mb-1">Type d'absence</label>
+            <div className="flex items-center gap-2">
+              <span className="w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: typeColor(leaveType) }} />
+              <select
+                value={leaveType}
+                onChange={(e) => setLeaveType(e.target.value)}
+                className="w-full px-3 py-2.5 rounded-lg border border-slate-300 bg-white text-sm focus:ring-2 focus:ring-[#6b4fd8] outline-none"
+              >
+                {Object.keys(TYPE_STYLES).map((t) => (
+                  <option key={t} value={t}>{t}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold uppercase text-slate-600 mb-1">Commentaire (facultatif)</label>
+            <textarea rows="3" value={employeeComment} onChange={(e) => setEmployeeComment(e.target.value)}
+              placeholder="Ex : vacances d'été, rendez-vous…"
+              className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm outline-none focus:ring-2 focus:ring-[#6b4fd8]" />
+          </div>
+
+          {formMessage.type === "error" && (
+            <div className="p-3 rounded-lg text-xs font-medium bg-rose-50 text-rose-800 border border-rose-200">
+              {formMessage.text}
+            </div>
+          )}
+
+          <div className="flex gap-3 pt-1">
+            <button type="button" onClick={() => setShowModal(false)}
+              className="flex-1 py-2.5 rounded-lg border border-slate-300 text-sm font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer">
+              Retour
+            </button>
+            <button type="submit"
+              className="flex-1 py-2.5 text-white text-sm font-semibold rounded-lg flex items-center justify-center gap-2 cursor-pointer hover:opacity-90"
+              style={{ backgroundColor: PURPLE }}>
+              <Send className="w-4 h-4" /> Envoyer la demande
+            </button>
+          </div>
+        </form>
+      </div>
+    );
+  };
+
+  // =========================================================================
+  // VUE : PLANNING (frise par personne, colorée par type)
+  // =========================================================================
+  const renderPlanning = () => {
+    const days = Array.from({ length: 42 }, (_, i) => addDays(planStart, i));
+    const weeks = Array.from({ length: 6 }, (_, i) => addDays(planStart, i * 7));
+    const rows = isAdmin ? employees.filter((e) => e.role !== "admin") : [user, ...team];
+
+    return (
+      <div className="space-y-4">
+        <div className="flex flex-wrap items-center gap-3 bg-[#e8ebf8] p-3 rounded-xl">
+          <button onClick={() => setPlanStart(mondayOf(new Date()))}
+            className="px-4 py-2 bg-white rounded-lg border border-slate-200 text-sm font-semibold hover:bg-slate-50 cursor-pointer">
+            Aujourd'hui
+          </button>
+          <div className="flex bg-white rounded-lg border border-slate-200 overflow-hidden">
+            <button onClick={() => setPlanStart(addDays(planStart, -7))} className="px-3 py-2 hover:bg-slate-50 cursor-pointer">
+              <ChevronLeft className="w-4 h-4" />
+            </button>
+            <button onClick={() => setPlanStart(addDays(planStart, 7))} className="px-3 py-2 border-l border-slate-200 hover:bg-slate-50 cursor-pointer">
+              <ChevronRight className="w-4 h-4" />
+            </button>
+          </div>
+          <div className="ml-auto">{renderLegend()}</div>
+        </div>
+
+        <div className="bg-white rounded-xl border border-slate-200 overflow-x-auto">
+          <table className="border-collapse text-sm w-full">
+            <thead>
+              <tr>
+                <th className="sticky left-0 bg-white z-10 min-w-[200px]" />
+                {weeks.map((w) => (
+                  <th key={w.toISOString()} colSpan={7}
+                    className="text-left px-2 py-2 text-xs font-semibold text-slate-600 border-l border-slate-200">
+                    S{isoWeek(w)} · {w.toLocaleDateString("fr-FR", { day: "numeric", month: "short" })}
+                  </th>
+                ))}
+              </tr>
+              <tr>
+                <th className="sticky left-0 bg-white z-10" />
+                {days.map((d) => {
+                  const isToday = formatYMD(d) === todayKey;
+                  return (
+                    <th key={d.toISOString()} className="min-w-[30px] py-1 text-[11px] font-medium text-slate-500">
+                      <span
+                        className={`inline-flex w-6 h-6 items-center justify-center rounded-full ${isToday ? "text-white" : ""}`}
+                        style={isToday ? { backgroundColor: PURPLE } : {}}
+                      >
+                        {d.getDate()}
+                      </span>
+                    </th>
+                  );
+                })}
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td className="sticky left-0 bg-white z-10 px-3 pt-3 pb-1 text-xs font-bold" style={{ color: PURPLE }}>
+                  Équipe SAT
+                </td>
+                <td colSpan={42} />
+              </tr>
+              {rows.map((emp) => (
+                <tr key={emp.id}>
+                  <td className="sticky left-0 bg-white z-10 px-3 py-1.5 border-t border-slate-100 text-slate-800 whitespace-nowrap">
+                    {emp.full_name}
+                  </td>
+                  {days.map((d) => {
+                    const dow = d.getDay();
+                    const weekend = dow === 0 || dow === 6;
+                    const holiday = holidaysMap[formatYMD(d)];
+                    const lv = leaveOnDay(emp.id, d);
+                    let style = {};
+                    let title = "";
+                    if (weekend) style = { backgroundColor: WEEKEND_BG };
+                    else if (holiday) {
+                      style = { backgroundColor: HOLIDAY_BG };
+                      title = holiday;
+                    } else if (lv) {
+                      style = leaveCellStyle(lv);
+                      title = `${emp.full_name} — ${lv.leave_type} (${lv.status === "approved" ? "validé" : "en attente"})`;
+                    }
+                    return (
+                      <td key={d.toISOString()} title={title}
+                        className="h-7 border border-slate-100" style={style} />
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    );
+  };
+
+  // =========================================================================
+  // VUE : APPROBATION (liste + détail)
+  // =========================================================================
+  const renderApproval = (mode = "rh") => {
+    const isMgr = mode === "manager";
+    const tabs = isMgr
+      ? [
+          { key: "todo", label: "À valider", list: teamPending, count: teamPending.length },
+          { key: "done", label: "Traitées", list: teamDone, count: teamDone.length },
+        ]
+      : [
+          { key: "todo", label: "À traiter", list: pendingLeaves, count: pendingLeaves.length },
+          { key: "notif", label: "Notifications", list: notifLeaves, count: unseenCount },
+          { key: "done", label: "Traitées", list: doneLeaves, count: doneLeaves.length },
+        ];
+    const activeTab = tabs.some((t) => t.key === adminTab) ? adminTab : "todo";
+    const list = tabs.find((t) => t.key === activeTab).list;
+    const selected = (isMgr ? teamLeaves : leaves).find((l) => l.id === selectedId);
+    // La RH peut décider à la place d'un manager seulement après l'avoir demandé explicitement
+    const canDecide =
+      selected && selected.status === "pending" && (isMgr || !selected.manager_id || overrideId === selected.id);
+
+    return (
+      <div className="grid grid-cols-1 lg:grid-cols-12 bg-white rounded-xl border border-slate-200 overflow-hidden min-h-[520px]">
+        <div className="lg:col-span-5 border-r border-slate-200">
+          <div className="flex border-b border-slate-200">
+            {tabs.map((t) => (
+              <button key={t.key} onClick={() => { setAdminTab(t.key); setSelectedId(null); }}
+                className={`flex items-center gap-2 px-4 py-4 text-sm font-medium cursor-pointer border-b-2 ${
+                  activeTab === t.key ? "bg-[#f3f0ff] border-[#6b4fd8] text-[#6b4fd8]" : "border-transparent text-slate-600 hover:bg-slate-50"
+                }`}>
+                {t.label}
+                <span className="px-2 py-0.5 rounded-full text-xs bg-[#ddd6fb] text-[#3b2a8f] font-semibold">{t.count}</span>
+              </button>
+            ))}
+          </div>
+          {activeTab === "notif" && (
+            <p className="px-6 py-3 text-xs text-slate-500 bg-slate-50 border-b border-slate-100">
+              Ces demandes sont validées par le manager du collaborateur. Vous êtes simplement informé(e).
+            </p>
+          )}
+          {list.length === 0 ? (
+            <p className="p-10 text-center text-sm text-slate-400">Rien à afficher ici.</p>
+          ) : (
+            <div className="divide-y divide-slate-100">
+              {list.map((l) => (
+                <button key={l.id} onClick={() => setSelectedId(l.id)}
+                  className={`w-full text-left px-6 py-4 cursor-pointer transition ${
+                    selectedId === l.id ? "bg-[#f3f0ff]" : "hover:bg-slate-50"
+                  }`}>
+                  <p className="font-medium text-slate-900 flex items-center gap-2">
+                    {activeTab === "notif" && !l.rh_seen && (
+                      <span className="w-2 h-2 rounded-full inline-block shrink-0" style={{ backgroundColor: PURPLE }} title="Non lu" />
+                    )}
+                    <TypeDot type={l.leave_type} /> {l.employee.full_name}
+                  </p>
+                  <p className="text-sm text-slate-500 flex items-center gap-2">
+                    Du {fmtFR(l.start_date)} au {fmtFR(l.end_date)} ({l.days_count} jour(s))
+                    {l.status === "pending" ? (
+                      <Hourglass className="w-4 h-4 text-slate-600" />
+                    ) : l.status === "approved" ? (
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                    ) : (
+                      <XCircle className="w-4 h-4 text-rose-600" />
+                    )}
+                  </p>
+                  {activeTab === "notif" && (
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      Manager : {l.manager_name}
+                      {l.decided_by_name ? ` · décidé par ${l.decided_by_name}` : " · en attente de sa décision"}
+                    </p>
+                  )}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="lg:col-span-7 bg-[#f6f7ff] flex items-center justify-center p-8">
+          {!selected ? (
+            <div className="text-center text-slate-400">
+              <Mail className="w-24 h-24 mx-auto text-[#d9d4f7]" strokeWidth={1} />
+              <p className="mt-3 text-sm">
+                {isMgr ? "Sélectionnez une demande de votre équipe" : "Sélectionnez une demande pour la traiter"}
+              </p>
+            </div>
+          ) : (
+            <div className="w-full max-w-lg bg-white rounded-xl border border-slate-200 p-6 space-y-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h3 className="text-lg font-extrabold" style={{ color: NAVY }}>{selected.employee.full_name}</h3>
+                  <p className="text-xs text-slate-500">{selected.employee.email}</p>
+                  <p className="text-xs text-slate-500 mt-1">
+                    Solde actuel : <strong>{selected.employee.solde_cp} CP</strong> · <strong>{selected.employee.solde_rtt} RTT</strong>
+                  </p>
+                </div>
+                {renderStatusPill(selected.status)}
+              </div>
+
+              <div className="grid grid-cols-2 gap-3 text-sm">
+                <div className="bg-[#f3f0ff] rounded-lg p-3">
+                  <p className="text-xs text-slate-500">Type</p>
+                  <p className="font-semibold flex items-center gap-2"><TypeDot type={selected.leave_type} />{selected.leave_type}</p>
+                </div>
+                <div className="bg-[#f3f0ff] rounded-lg p-3">
+                  <p className="text-xs text-slate-500">Durée</p>
+                  <p className="font-semibold">{selected.days_count} jour(s)</p>
+                </div>
+                <div className="bg-[#f3f0ff] rounded-lg p-3 col-span-2">
+                  <p className="text-xs text-slate-500">Période</p>
+                  <p className="font-semibold">
+                    Du {fmtFR(selected.start_date)} ({halfLabel(selected.start_half_day)}) au{" "}
+                    {fmtFR(selected.end_date)} ({halfLabel(selected.end_half_day)})
+                  </p>
+                </div>
+              </div>
+
+              {selected.manager_name && !isMgr && (
+                <p className="text-xs text-slate-600 bg-slate-50 rounded-lg p-3">
+                  Manager : <strong>{selected.manager_name}</strong>
+                  {selected.decided_by_name && <> · Décision de <strong>{selected.decided_by_name}</strong></>}
+                </p>
+              )}
+
+              {selected.employee_comment && (
+                <p className="text-sm text-slate-600 bg-slate-50 rounded-lg p-3 italic">
+                  💬 « {selected.employee_comment} »
+                </p>
+              )}
+
+              {canDecide ? (
+                <>
+                  <textarea rows="2" placeholder="Note pour le collaborateur (facultatif)…"
+                    value={adminComments[selected.id] || ""}
+                    onChange={(e) => setAdminComments({ ...adminComments, [selected.id]: e.target.value })}
+                    className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm outline-none focus:ring-2 focus:ring-[#6b4fd8]" />
+                  <div className="flex gap-3">
+                    <button onClick={() => handleUpdateStatus(selected.id, "approved")}
+                      className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold rounded-lg flex items-center justify-center gap-2 cursor-pointer">
+                      <CheckCircle2 className="w-4 h-4" /> Valider
+                    </button>
+                    <button onClick={() => handleUpdateStatus(selected.id, "rejected")}
+                      className="flex-1 py-2.5 bg-rose-600 hover:bg-rose-700 text-white text-sm font-semibold rounded-lg flex items-center justify-center gap-2 cursor-pointer">
+                      <XCircle className="w-4 h-4" /> Refuser
+                    </button>
+                  </div>
+                </>
+              ) : selected.status === "pending" ? (
+                <div className="text-sm bg-amber-50 border border-amber-200 text-amber-900 rounded-lg p-3 space-y-2">
+                  <p>
+                    En attente de la décision de <strong>{selected.manager_name}</strong>. La RH est simplement informée.
+                  </p>
+                  <button onClick={() => setOverrideId(selected.id)}
+                    className="text-xs font-semibold underline cursor-pointer">
+                    Décider à sa place (absence du manager, par exemple)
+                  </button>
+                </div>
+              ) : (
+                selected.admin_comment && (
+                  <p className="text-sm text-slate-600">
+                    Note {selected.decided_by_name ? `de ${selected.decided_by_name}` : "RH"} : « {selected.admin_comment} »
+                  </p>
+                )
+              )}
+
+              {!isMgr && selected.manager_id && !selected.rh_seen && (
+                <button onClick={() => handleMarkSeen(selected.id)}
+                  className="w-full py-2 text-sm font-semibold rounded-lg border border-slate-300 hover:bg-slate-50 cursor-pointer">
+                  Marquer comme vu
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  // =========================================================================
+  // VUE : COLLABORATEURS
+  // =========================================================================
+  const renderEmployees = () => {
+    const tokens = normalize(empSearch).split(/\s+/).filter(Boolean);
+    const filtered = employees.filter((e) =>
+      tokens.every((t) => normalize(`${e.full_name} ${e.email}`).includes(t))
+    );
+    const exYear = exerciseStart();
+    const sumDays = (list) => list.reduce((sum, l) => sum + l.days_count, 0);
+
+    const renderEmpDetails = (emp) => {
+      const mine = leaves.filter((l) => l.user_id === emp.id);
+      const cur = mine.filter((l) => inExercise(l.start_date, exYear));
+      const stat = (type) => {
+        const list = cur.filter((l) => l.leave_type === type);
+        return {
+          approved: sumDays(list.filter((l) => l.status === "approved")),
+          pending: sumDays(list.filter((l) => l.status === "pending")),
+        };
+      };
+      const CP = "Congés Payés (CP)";
+      const cpStat = stat(CP);
+      const rttStat = stat("RTT");
+      const cpTotal = (emp.droits_cp || 0) + (emp.droits_fractionnement || 0);
+      const others = {};
+      cur
+        .filter((l) => l.status === "approved" && l.leave_type !== CP && l.leave_type !== "RTT")
+        .forEach((l) => { others[l.leave_type] = (others[l.leave_type] || 0) + l.days_count; });
+      const shown = (histScope === "current" ? cur : mine)
+        .slice()
+        .sort((x, y) => (x.start_date < y.start_date ? 1 : -1));
+
+      const d = rightsDraft[emp.id] || {};
+      const val = (k) => (d[k] !== undefined ? d[k] : emp[k]);
+      const setVal = (k, v) => setRightsDraft({ ...rightsDraft, [emp.id]: { ...d, [k]: v } });
+
+      const balanceBox = (title, color, droits, st, dispo) => (
+        <div className="rounded-xl border border-slate-200 bg-white p-4">
+          <p className="text-xs font-bold uppercase flex items-center gap-2" style={{ color }}>
+            <span className="w-2.5 h-2.5 rounded-full inline-block" style={{ backgroundColor: color }} /> {title}
+          </p>
+          <div className="mt-3 grid grid-cols-4 gap-2 text-center">
+            {[["Droits", droits], ["Validés", st.approved], ["En attente", st.pending], ["Disponible", dispo]].map(([label, v], i) => (
+              <div key={label}>
+                <p className="text-xl font-extrabold" style={{ color: i === 3 ? color : NAVY }}>{v}</p>
+                <p className="text-[10px] uppercase text-slate-500">{label}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+
+      return (
+        <>
+          <div>
+            <p className="text-xs font-semibold uppercase text-slate-500 mb-2">
+              Situation actuelle — exercice du 01/05/{exYear} au 30/04/{exYear + 1}
+            </p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {balanceBox("Congés payés (CP + fractionnement)", typeColor(CP), cpTotal, cpStat, emp.solde_cp)}
+              {balanceBox("RTT", typeColor("RTT"), emp.droits_rtt, rttStat, emp.solde_rtt)}
+            </div>
+            <p className="text-xs text-slate-600 mt-2">
+              Samedis décomptés : <strong>{emp.samedis_utilises}/5</strong>
+              {Object.entries(others).map(([t, n]) => (
+                <span key={t}> · {TYPE_STYLES[t] ? TYPE_STYLES[t].label : t} : <strong>{n} j</strong></span>
+              ))}
+            </p>
+          </div>
+
+          <div className="rounded-xl border border-slate-200 bg-white p-4">
+            <p className="text-xs font-semibold uppercase text-slate-500 mb-3">
+              Manager — valide les demandes de {emp.full_name}
+            </p>
+            <div className="flex flex-wrap items-center gap-3">
+              <select value={emp.manager_id ?? ""} onChange={(e) => handleSetManager(emp, e.target.value)}
+                className="px-3 py-2 rounded-lg border border-slate-300 text-sm outline-none focus:ring-2 focus:ring-[#6b4fd8] bg-white">
+                <option value="">Aucun : la RH valide</option>
+                {employees.filter((m) => m.role !== "admin" && m.id !== emp.id).map((m) => (
+                  <option key={m.id} value={m.id}>{m.full_name}</option>
+                ))}
+              </select>
+              <span className="text-xs text-slate-500">
+                {emp.manager_id ? "La RH reçoit une notification pour chaque demande." : "Sans manager, c'est la RH qui valide."}
+              </span>
+            </div>
+          </div>
+
+          <div className="rounded-xl border border-slate-200 bg-white p-4">
+            <p className="text-xs font-semibold uppercase text-slate-500 mb-3">Droits de l'exercice (modifiables par la RH)</p>
+            <div className="flex flex-wrap items-end gap-3">
+              {[
+                ["droits_cp", "CP (principale + 5e sem. + anc.)"],
+                ["droits_fractionnement", "Fractionnement"],
+                ["droits_rtt", "RTT"],
+              ].map(([key, label]) => (
+                <label key={key} className="text-[11px] font-semibold uppercase text-slate-500">
+                  {label}
+                  <input type="number" min="0" step="0.5" value={val(key)}
+                    onChange={(e) => setVal(key, e.target.value)}
+                    className="block w-28 mt-1 px-2 py-1.5 rounded-lg border border-slate-300 text-sm font-normal normal-case text-slate-900 outline-none focus:ring-2 focus:ring-[#6b4fd8]" />
+                </label>
+              ))}
+              <button onClick={() => handleSaveRights(emp)} disabled={Object.keys(d).length === 0}
+                className="px-3 py-1.5 text-white text-xs font-semibold rounded-lg cursor-pointer hover:opacity-90 disabled:opacity-30 disabled:cursor-default"
+                style={{ backgroundColor: PURPLE }}>
+                Enregistrer
+              </button>
+              {rightsMsg.id === emp.id && rightsMsg.text && (
+                <span className="text-xs font-medium text-[#3b2a8f]">{rightsMsg.text}</span>
+              )}
+            </div>
+          </div>
+
+          <div className="rounded-xl border border-slate-200 bg-white p-4">
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+              <p className="text-xs font-semibold uppercase text-slate-500">
+                Historique des demandes ({shown.length})
+              </p>
+              <div className="flex rounded-lg border border-slate-200 overflow-hidden text-xs font-semibold">
+                {[["current", "Exercice en cours"], ["all", "Tout l'historique"]].map(([k, label]) => (
+                  <button key={k} onClick={() => setHistScope(k)}
+                    className="px-3 py-1.5 cursor-pointer"
+                    style={histScope === k ? { backgroundColor: PURPLE, color: "white" } : { color: "#475569" }}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {shown.length === 0 ? (
+              <p className="text-sm text-slate-500 py-4 text-center">Aucune demande sur cette période.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-left text-[11px] uppercase text-slate-500 border-b border-slate-200">
+                      <th className="py-2 pr-3">Type</th>
+                      <th className="py-2 pr-3">Période</th>
+                      <th className="py-2 pr-3">Jours</th>
+                      <th className="py-2 pr-3">Statut</th>
+                      <th className="py-2">Commentaires</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {shown.map((l) => (
+                      <tr key={l.id} className="border-b border-slate-100 align-top">
+                        <td className="py-2 pr-3 whitespace-nowrap">
+                          <span className="inline-flex items-center gap-2">
+                            <TypeDot type={l.leave_type} />
+                            {TYPE_STYLES[l.leave_type] ? TYPE_STYLES[l.leave_type].label : l.leave_type}
+                          </span>
+                        </td>
+                        <td className="py-2 pr-3 whitespace-nowrap">
+                          Du {fmtFR(l.start_date)}{l.start_half_day === "afternoon" ? " (après-midi)" : ""} au {fmtFR(l.end_date)}{l.end_half_day === "morning" ? " (matin)" : ""}
+                        </td>
+                        <td className="py-2 pr-3 font-semibold">{l.days_count}</td>
+                        <td className="py-2 pr-3">{renderStatusPill(l.status)}</td>
+                        <td className="py-2 text-xs text-slate-500">
+                          {l.employee_comment && <p>👤 {l.employee_comment}</p>}
+                          {l.admin_comment && <p>🛡️ RH : {l.admin_comment}</p>}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </>
+      );
+    };
+
+    return (
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+      <div className="lg:col-span-4 bg-white p-6 rounded-xl border border-slate-200 h-fit">
+        <h2 className="text-lg font-extrabold mb-1" style={{ color: NAVY }}>Ajouter un collaborateur</h2>
+        <p className="text-xs text-slate-500 mb-4">Il pourra se connecter avec son adresse email.</p>
+        <form onSubmit={handleAddEmployee} className="space-y-4">
+          <div>
+            <label className="block text-xs font-semibold uppercase text-slate-600 mb-1">Nom et prénom</label>
+            <input type="text" required placeholder="Ex : Sophie Martin" value={newEmpName}
+              onChange={(e) => setNewEmpName(e.target.value)}
+              className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm outline-none focus:ring-2 focus:ring-[#6b4fd8]" />
+          </div>
+          <div>
+            <label className="block text-xs font-semibold uppercase text-slate-600 mb-1">Email professionnel</label>
+            <input type="email" required placeholder="sophie.martin@sat.fr" value={newEmpEmail}
+              onChange={(e) => setNewEmpEmail(e.target.value)}
+              className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm outline-none focus:ring-2 focus:ring-[#6b4fd8]" />
+          </div>
+          {empMsg && <p className="text-xs font-medium text-[#3b2a8f] bg-[#ece8fb] p-2.5 rounded-lg">{empMsg}</p>}
+          <button type="submit"
+            className="w-full py-2.5 text-white text-sm font-semibold rounded-lg flex items-center justify-center gap-2 cursor-pointer hover:opacity-90"
+            style={{ backgroundColor: PURPLE }}>
+            <Plus className="w-4 h-4" /> Créer le compte
+          </button>
+        </form>
+      </div>
+
+
+        <div className="lg:col-span-8 bg-white rounded-xl border border-slate-200 overflow-hidden">
+          <div className="p-5 border-b border-slate-200 space-y-3">
+            <h2 className="text-lg font-extrabold" style={{ color: NAVY }}>
+              Effectif ({filtered.length}{tokens.length > 0 ? ` sur ${employees.length}` : ""})
+            </h2>
+            <div className="relative">
+              <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+              <input type="text" value={empSearch} onChange={(e) => setEmpSearch(e.target.value)}
+                placeholder="Rechercher par nom ou prénom…"
+                className="w-full pl-9 pr-9 py-2 rounded-lg border border-slate-300 text-sm outline-none focus:ring-2 focus:ring-[#6b4fd8]" />
+              {empSearch && (
+                <button onClick={() => setEmpSearch("")} title="Effacer"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-700 cursor-pointer">
+                  <X className="w-4 h-4" />
+                </button>
+              )}
+            </div>
+          </div>
+          <div className="divide-y divide-slate-100">
+            {filtered.length === 0 && (
+              <p className="p-8 text-sm text-slate-500 text-center">Aucun collaborateur ne correspond à cette recherche.</p>
+            )}
+            {filtered.map((emp) => {
+              const isAdmin = emp.role === "admin";
+              const open = openEmpId === emp.id && !isAdmin;
+              const pendingN = leaves.filter((l) => l.user_id === emp.id && l.status === "pending").length;
+              return (
+                <div key={emp.id}>
+                  <div className="flex items-center hover:bg-slate-50">
+                    <button onClick={() => !isAdmin && setOpenEmpId(open ? null : emp.id)}
+                      className={`flex-1 min-w-0 p-4 flex items-center gap-3 text-left ${isAdmin ? "cursor-default" : "cursor-pointer"}`}>
+                      <ChevronDown className={`w-4 h-4 shrink-0 transition-transform ${isAdmin ? "opacity-0" : "text-slate-400"} ${open ? "rotate-180" : ""}`} />
+                      <div className="min-w-0 flex-1">
+                        <p className="font-semibold text-sm text-slate-900 truncate">
+                          {emp.full_name}
+                          {isAdmin && (
+                            <span className="ml-2 text-[10px] uppercase px-2 py-0.5 bg-[#ddd6fb] text-[#3b2a8f] rounded-full font-bold">
+                              Admin RH
+                            </span>
+                          )}
+                          {!isAdmin && emp.is_manager && (
+                            <span className="ml-2 text-[10px] uppercase px-2 py-0.5 bg-sky-100 text-sky-800 rounded-full font-bold">
+                              Manager
+                            </span>
+                          )}
+                        </p>
+                        <p className="text-xs text-slate-500 truncate">
+                          {emp.email}{emp.manager_name ? ` · Manager : ${emp.manager_name}` : ""}
+                        </p>
+                      </div>
+                      {!isAdmin && (
+                        <div className="hidden sm:flex items-center gap-2 text-xs shrink-0">
+                          <span className="px-2 py-0.5 rounded-full bg-[#ece8fb] text-[#3b2a8f] font-semibold">CP {emp.solde_cp}</span>
+                          <span className="px-2 py-0.5 rounded-full bg-sky-100 text-sky-800 font-semibold">RTT {emp.solde_rtt}</span>
+                          {pendingN > 0 && (
+                            <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 font-semibold">{pendingN} en attente</span>
+                          )}
+                        </div>
+                      )}
+                    </button>
+                    {!isAdmin && (
+                      <button onClick={() => handleDeleteEmployee(emp.id, emp.full_name)}
+                        className="p-2 mr-3 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg cursor-pointer" title="Supprimer">
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    )}
+                  </div>
+                  {open && <div className="px-4 pb-5 pt-1 space-y-4 bg-slate-50/70">{renderEmpDetails(emp)}</div>}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // =========================================================================
+  // VUE : EXPORTS
+  // =========================================================================
+  const renderExports = () => (
+    <div className="max-w-xl bg-white rounded-xl border border-slate-200 p-6">
+      <h2 className="text-lg font-extrabold mb-1" style={{ color: NAVY }}>Export comptabilité</h2>
+      <p className="text-sm text-slate-500 mb-5">
+        Télécharge toutes les demandes ({leaves.length}) au format CSV, directement lisible dans Excel.
+      </p>
+      <button onClick={exportToCSV}
+        className="px-5 py-2.5 text-white text-sm font-semibold rounded-lg flex items-center gap-2 cursor-pointer hover:opacity-90"
+        style={{ backgroundColor: PURPLE }}>
+        <Download className="w-4 h-4" /> Exporter vers Excel (.csv)
+      </button>
+    </div>
+  );
+
+  const titles = {
+    calendar: "Mon calendrier",
+    request: "Demande d'absence",
+    planning: "Planning",
+    approval: "Approbation",
+    employees: "Collaborateurs",
+    exports: "Exports",
+  };
+
+  // =========================================================================
+  // LAYOUT PRINCIPAL (pleine largeur)
+  // =========================================================================
+  return (
+    <div className="min-h-screen w-full flex flex-col md:flex-row" style={{ backgroundColor: PAGE_BG }}>
+      {/* Sidebar desktop */}
+      <aside className="hidden md:flex w-64 shrink-0 flex-col text-white sticky top-0 h-screen" style={{ backgroundColor: NAVY }}>
+        <div className="px-5 py-6 flex items-center gap-3">
+          <div className="p-2 rounded-lg" style={{ backgroundColor: PURPLE }}>
+            <CalendarDays className="w-5 h-5" />
+          </div>
+          <span className="font-extrabold text-lg">SAT Congés</span>
+        </div>
+        <nav className="flex-1 px-3 space-y-1">
+          {nav.map((n) => {
+            const Icon = n.icon;
+            const active = view === n.key;
+            return (
+              <button key={n.key} onClick={() => setView(n.key)}
+                className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-semibold cursor-pointer transition ${
+                  active ? "" : "hover:bg-white/10"
+                }`}
+                style={active ? { backgroundColor: PURPLE } : {}}>
+                <Icon className="w-5 h-5" />
+                <span className="flex-1 text-left">{n.label}</span>
+                {n.badge > 0 && (
+                  <span className="px-2 py-0.5 rounded-md text-xs bg-[#ddd6fb] text-[#3b2a8f]">{n.badge}</span>
+                )}
+              </button>
+            );
+          })}
+        </nav>
+        <div className="p-4 border-t border-white/10">
+          <p className="text-sm font-semibold truncate">{user.full_name}</p>
+          <p className="text-xs text-white/60 truncate mb-3">{user.email}</p>
+          <button onClick={() => setUser(null)}
+            className="flex items-center gap-2 text-sm text-white/80 hover:text-white cursor-pointer">
+            <LogOut className="w-4 h-4" /> Déconnexion
+          </button>
+        </div>
+      </aside>
+
+      {/* Barre mobile */}
+      <header className="md:hidden text-white" style={{ backgroundColor: NAVY }}>
+        <div className="flex items-center justify-between px-4 py-3">
+          <span className="font-extrabold">SAT Congés</span>
+          <button onClick={() => setUser(null)} className="text-white/80 cursor-pointer">
+            <LogOut className="w-5 h-5" />
+          </button>
+        </div>
+        <div className="flex overflow-x-auto px-2 pb-2 gap-1">
+          {nav.map((n) => {
+            const Icon = n.icon;
+            const active = view === n.key;
+            return (
+              <button key={n.key} onClick={() => setView(n.key)}
+                className="flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-semibold whitespace-nowrap cursor-pointer"
+                style={active ? { backgroundColor: PURPLE } : {}}>
+                <Icon className="w-4 h-4" /> {n.label}
+                {n.badge > 0 && <span className="px-1.5 rounded bg-[#ddd6fb] text-[#3b2a8f]">{n.badge}</span>}
+              </button>
+            );
+          })}
+        </div>
+      </header>
+
+      {/* Contenu : prend tout l'espace restant */}
+      <main className="flex-1 min-w-0 w-full p-4 md:p-8 text-left">
+        <h1 className="text-2xl font-extrabold mb-5" style={{ color: NAVY }}>{titles[view]}</h1>
+        {view === "calendar" && renderCalendar()}
+        {view === "request" && renderRequest()}
+        {view === "planning" && renderPlanning()}
+        {view === "approval" && renderApproval("rh")}
+        {view === "team" && renderApproval("manager")}
+        {view === "employees" && renderEmployees()}
+        {view === "exports" && renderExports()}
+      </main>
+
+      {showModal && renderModal()}
+    </div>
+  );
+}

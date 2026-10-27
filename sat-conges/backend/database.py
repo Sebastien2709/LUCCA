@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, Integer, String, Float, Date, DateTime, ForeignKey, inspect, text
+from sqlalchemy import create_engine, Column, Integer, String, Float, Date, DateTime, Boolean, ForeignKey, inspect, text
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from datetime import datetime, date
 
@@ -53,6 +53,19 @@ class User(Base):
     droits_fractionnement = Column(Float, default=0.0)  # jours de fractionnement, ajoutés aux CP
     droits_rtt = Column(Float, default=0.0)             # 0 tant que la RH n'a pas crédité de RTT
     leaves = relationship("LeaveRequest", back_populates="employee")
+
+    # Manager : c'est lui qui valide les demandes de son équipe (la RH est simplement notifiée).
+    manager_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    manager = relationship("User", remote_side=[id], back_populates="reports")
+    reports = relationship("User", back_populates="manager")
+
+    @property
+    def manager_name(self):
+        return self.manager.full_name if self.manager else None
+
+    @property
+    def is_manager(self):
+        return len(self.reports) > 0
 
     # --- Soldes CALCULÉS (jamais stockés) : droits - jours validés ou en attente ---
     def solde_for(self, leave_type: str, ref_date: date):
@@ -109,20 +122,38 @@ class LeaveRequest(Base):
     admin_comment = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+    # Circuit de validation (valeurs figées à la création de la demande)
+    manager_id = Column(Integer, nullable=True)       # None = c'est la RH qui valide
+    manager_name = Column(String, nullable=True)
+    decided_by_id = Column(Integer, nullable=True)
+    decided_by_name = Column(String, nullable=True)
+    rh_seen = Column(Boolean, default=False)          # notification RH (demandes gérées par un manager) lue ?
+
     employee = relationship("User", back_populates="leaves")
 
 
 def ensure_columns():
     """Ajoute les nouvelles colonnes à une ancienne base SQLite (évite de la supprimer)."""
     lcols = {c["name"] for c in inspect(engine).get_columns("leave_requests")}
+    new_leave_cols = {
+        "saturdays_count": "INTEGER DEFAULT 0",
+        "manager_id": "INTEGER",
+        "manager_name": "VARCHAR",
+        "decided_by_id": "INTEGER",
+        "decided_by_name": "VARCHAR",
+        "rh_seen": "BOOLEAN DEFAULT 0",
+    }
     with engine.begin() as conn:
-        if "saturdays_count" not in lcols:
-            conn.execute(text("ALTER TABLE leave_requests ADD COLUMN saturdays_count INTEGER DEFAULT 0"))
+        for name, ddl in new_leave_cols.items():
+            if name not in lcols:
+                conn.execute(text(f"ALTER TABLE leave_requests ADD COLUMN {name} {ddl}"))
     cols = {c["name"] for c in inspect(engine).get_columns("users")}
     with engine.begin() as conn:
         if "droits_cp" not in cols:
             conn.execute(text("ALTER TABLE users ADD COLUMN droits_cp FLOAT DEFAULT 30"))
         if "droits_rtt" not in cols:
             conn.execute(text("ALTER TABLE users ADD COLUMN droits_rtt FLOAT DEFAULT 0"))
+        if "manager_id" not in cols:
+            conn.execute(text("ALTER TABLE users ADD COLUMN manager_id INTEGER"))
         if "droits_fractionnement" not in cols:
             conn.execute(text("ALTER TABLE users ADD COLUMN droits_fractionnement FLOAT DEFAULT 0"))
