@@ -17,6 +17,8 @@ import {
   Mail,
   Download,
   X,
+  Search,
+  ChevronDown,
 } from "lucide-react";
 
 const API_URL = "https://sat-conges-backend.onrender.com/api";
@@ -87,6 +89,11 @@ const getDaysInMonth = (dateObj) => {
   for (let d = 1; d <= lastDay.getDate(); d++) days.push(new Date(year, month, d));
   return days;
 };
+// Recherche insensible aux accents et à la casse ("jose" trouve "José")
+const normalize = (s) => (s || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+// Exercice de congés SAT : du 1er mai au 30 avril
+const exerciseStart = (d = new Date()) => (d.getMonth() >= 4 ? d.getFullYear() : d.getFullYear() - 1);
+const inExercise = (dateStr, startYear) => dateStr >= `${startYear}-05-01` && dateStr < `${startYear + 1}-05-01`;
 const halfLabel = (h) => (h === "morning" ? "matin" : "après-midi");
 
 export default function App() {
@@ -119,6 +126,10 @@ export default function App() {
   const [newEmpEmail, setNewEmpEmail] = useState("");
   const [empMsg, setEmpMsg] = useState("");
   const [rightsDraft, setRightsDraft] = useState({}); // droits en cours de saisie par la RH
+  const [rightsMsg, setRightsMsg] = useState({ id: null, text: "" });
+  const [empSearch, setEmpSearch] = useState("");
+  const [openEmpId, setOpenEmpId] = useState(null);
+  const [histScope, setHistScope] = useState("current"); // "current" | "all"
 
   // Sélection de dates + demande
   const [startDate, setStartDate] = useState("");
@@ -285,10 +296,10 @@ try {
       const copy = { ...rightsDraft };
       delete copy[emp.id];
       setRightsDraft(copy);
-      setEmpMsg(`Droits de ${emp.full_name} mis à jour.`);
+      setRightsMsg({ id: emp.id, text: "Droits enregistrés ✓" });
       fetchEmployees();
     } catch (err) {
-      setEmpMsg(err.message);
+      setRightsMsg({ id: emp.id, text: err.message });
     }
   };
 
@@ -369,6 +380,7 @@ try {
       if (res.ok) {
         setSelectedId(null);
         fetchLeaves();
+        fetchEmployees();
       }
     } catch (err) {
       console.error("Erreur lors de la mise à jour", err);
@@ -1223,9 +1235,161 @@ try {
   // =========================================================================
   // VUE : COLLABORATEURS
   // =========================================================================
-  const renderEmployees = () => (
-    <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-      <div className="lg:col-span-5 bg-white p-6 rounded-xl border border-slate-200 h-fit">
+  const renderEmployees = () => {
+    const tokens = normalize(empSearch).split(/\s+/).filter(Boolean);
+    const filtered = employees.filter((e) =>
+      tokens.every((t) => normalize(`${e.full_name} ${e.email}`).includes(t))
+    );
+    const exYear = exerciseStart();
+    const sumDays = (list) => list.reduce((sum, l) => sum + l.days_count, 0);
+
+    const renderEmpDetails = (emp) => {
+      const mine = leaves.filter((l) => l.user_id === emp.id);
+      const cur = mine.filter((l) => inExercise(l.start_date, exYear));
+      const stat = (type) => {
+        const list = cur.filter((l) => l.leave_type === type);
+        return {
+          approved: sumDays(list.filter((l) => l.status === "approved")),
+          pending: sumDays(list.filter((l) => l.status === "pending")),
+        };
+      };
+      const CP = "Congés Payés (CP)";
+      const cpStat = stat(CP);
+      const rttStat = stat("RTT");
+      const cpTotal = (emp.droits_cp || 0) + (emp.droits_fractionnement || 0);
+      const others = {};
+      cur
+        .filter((l) => l.status === "approved" && l.leave_type !== CP && l.leave_type !== "RTT")
+        .forEach((l) => { others[l.leave_type] = (others[l.leave_type] || 0) + l.days_count; });
+      const shown = (histScope === "current" ? cur : mine)
+        .slice()
+        .sort((x, y) => (x.start_date < y.start_date ? 1 : -1));
+
+      const d = rightsDraft[emp.id] || {};
+      const val = (k) => (d[k] !== undefined ? d[k] : emp[k]);
+      const setVal = (k, v) => setRightsDraft({ ...rightsDraft, [emp.id]: { ...d, [k]: v } });
+
+      const balanceBox = (title, color, droits, st, dispo) => (
+        <div className="rounded-xl border border-slate-200 bg-white p-4">
+          <p className="text-xs font-bold uppercase flex items-center gap-2" style={{ color }}>
+            <span className="w-2.5 h-2.5 rounded-full inline-block" style={{ backgroundColor: color }} /> {title}
+          </p>
+          <div className="mt-3 grid grid-cols-4 gap-2 text-center">
+            {[["Droits", droits], ["Validés", st.approved], ["En attente", st.pending], ["Disponible", dispo]].map(([label, v], i) => (
+              <div key={label}>
+                <p className="text-xl font-extrabold" style={{ color: i === 3 ? color : NAVY }}>{v}</p>
+                <p className="text-[10px] uppercase text-slate-500">{label}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+
+      return (
+        <>
+          <div>
+            <p className="text-xs font-semibold uppercase text-slate-500 mb-2">
+              Situation actuelle — exercice du 01/05/{exYear} au 30/04/{exYear + 1}
+            </p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {balanceBox("Congés payés (CP + fractionnement)", typeColor(CP), cpTotal, cpStat, emp.solde_cp)}
+              {balanceBox("RTT", typeColor("RTT"), emp.droits_rtt, rttStat, emp.solde_rtt)}
+            </div>
+            <p className="text-xs text-slate-600 mt-2">
+              Samedis décomptés : <strong>{emp.samedis_utilises}/5</strong>
+              {Object.entries(others).map(([t, n]) => (
+                <span key={t}> · {TYPE_STYLES[t] ? TYPE_STYLES[t].label : t} : <strong>{n} j</strong></span>
+              ))}
+            </p>
+          </div>
+
+          <div className="rounded-xl border border-slate-200 bg-white p-4">
+            <p className="text-xs font-semibold uppercase text-slate-500 mb-3">Droits de l'exercice (modifiables par la RH)</p>
+            <div className="flex flex-wrap items-end gap-3">
+              {[
+                ["droits_cp", "CP (principale + 5e sem. + anc.)"],
+                ["droits_fractionnement", "Fractionnement"],
+                ["droits_rtt", "RTT"],
+              ].map(([key, label]) => (
+                <label key={key} className="text-[11px] font-semibold uppercase text-slate-500">
+                  {label}
+                  <input type="number" min="0" step="0.5" value={val(key)}
+                    onChange={(e) => setVal(key, e.target.value)}
+                    className="block w-28 mt-1 px-2 py-1.5 rounded-lg border border-slate-300 text-sm font-normal normal-case text-slate-900 outline-none focus:ring-2 focus:ring-[#6b4fd8]" />
+                </label>
+              ))}
+              <button onClick={() => handleSaveRights(emp)} disabled={Object.keys(d).length === 0}
+                className="px-3 py-1.5 text-white text-xs font-semibold rounded-lg cursor-pointer hover:opacity-90 disabled:opacity-30 disabled:cursor-default"
+                style={{ backgroundColor: PURPLE }}>
+                Enregistrer
+              </button>
+              {rightsMsg.id === emp.id && rightsMsg.text && (
+                <span className="text-xs font-medium text-[#3b2a8f]">{rightsMsg.text}</span>
+              )}
+            </div>
+          </div>
+
+          <div className="rounded-xl border border-slate-200 bg-white p-4">
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+              <p className="text-xs font-semibold uppercase text-slate-500">
+                Historique des demandes ({shown.length})
+              </p>
+              <div className="flex rounded-lg border border-slate-200 overflow-hidden text-xs font-semibold">
+                {[["current", "Exercice en cours"], ["all", "Tout l'historique"]].map(([k, label]) => (
+                  <button key={k} onClick={() => setHistScope(k)}
+                    className="px-3 py-1.5 cursor-pointer"
+                    style={histScope === k ? { backgroundColor: PURPLE, color: "white" } : { color: "#475569" }}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {shown.length === 0 ? (
+              <p className="text-sm text-slate-500 py-4 text-center">Aucune demande sur cette période.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-left text-[11px] uppercase text-slate-500 border-b border-slate-200">
+                      <th className="py-2 pr-3">Type</th>
+                      <th className="py-2 pr-3">Période</th>
+                      <th className="py-2 pr-3">Jours</th>
+                      <th className="py-2 pr-3">Statut</th>
+                      <th className="py-2">Commentaires</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {shown.map((l) => (
+                      <tr key={l.id} className="border-b border-slate-100 align-top">
+                        <td className="py-2 pr-3 whitespace-nowrap">
+                          <span className="inline-flex items-center gap-2">
+                            <TypeDot type={l.leave_type} />
+                            {TYPE_STYLES[l.leave_type] ? TYPE_STYLES[l.leave_type].label : l.leave_type}
+                          </span>
+                        </td>
+                        <td className="py-2 pr-3 whitespace-nowrap">
+                          Du {fmtFR(l.start_date)}{l.start_half_day === "afternoon" ? " (après-midi)" : ""} au {fmtFR(l.end_date)}{l.end_half_day === "morning" ? " (matin)" : ""}
+                        </td>
+                        <td className="py-2 pr-3 font-semibold">{l.days_count}</td>
+                        <td className="py-2 pr-3">{renderStatusPill(l.status)}</td>
+                        <td className="py-2 text-xs text-slate-500">
+                          {l.employee_comment && <p>👤 {l.employee_comment}</p>}
+                          {l.admin_comment && <p>🛡️ RH : {l.admin_comment}</p>}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </>
+      );
+    };
+
+    return (
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+      <div className="lg:col-span-4 bg-white p-6 rounded-xl border border-slate-200 h-fit">
         <h2 className="text-lg font-extrabold mb-1" style={{ color: NAVY }}>Ajouter un collaborateur</h2>
         <p className="text-xs text-slate-500 mb-4">Il pourra se connecter avec son adresse email.</p>
         <form onSubmit={handleAddEmployee} className="space-y-4">
@@ -1250,68 +1414,76 @@ try {
         </form>
       </div>
 
-      <div className="lg:col-span-7 bg-white rounded-xl border border-slate-200 overflow-hidden">
-        <div className="p-5 border-b border-slate-200">
-          <h2 className="text-lg font-extrabold" style={{ color: NAVY }}>Effectif ({employees.length})</h2>
-        </div>
-        <div className="divide-y divide-slate-100">
-          {employees.map((emp) => {
-            const d = rightsDraft[emp.id] || {};
-            const val = (k) => (d[k] !== undefined ? d[k] : emp[k]);
-            const setVal = (k, v) => setRightsDraft({ ...rightsDraft, [emp.id]: { ...d, [k]: v } });
-            const fields = [
-              ["droits_cp", "CP (principale + 5e sem. + anc.)"],
-              ["droits_fractionnement", "Fractionnement"],
-              ["droits_rtt", "RTT"],
-            ];
-            return (
-              <div key={emp.id} className="p-4 hover:bg-slate-50">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="font-semibold text-sm text-slate-900">
-                      {emp.full_name}
-                      {emp.role === "admin" && (
-                        <span className="ml-2 text-[10px] uppercase px-2 py-0.5 bg-[#ddd6fb] text-[#3b2a8f] rounded-full font-bold">
-                          Admin RH
-                        </span>
+
+        <div className="lg:col-span-8 bg-white rounded-xl border border-slate-200 overflow-hidden">
+          <div className="p-5 border-b border-slate-200 space-y-3">
+            <h2 className="text-lg font-extrabold" style={{ color: NAVY }}>
+              Effectif ({filtered.length}{tokens.length > 0 ? ` sur ${employees.length}` : ""})
+            </h2>
+            <div className="relative">
+              <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+              <input type="text" value={empSearch} onChange={(e) => setEmpSearch(e.target.value)}
+                placeholder="Rechercher par nom ou prénom…"
+                className="w-full pl-9 pr-9 py-2 rounded-lg border border-slate-300 text-sm outline-none focus:ring-2 focus:ring-[#6b4fd8]" />
+              {empSearch && (
+                <button onClick={() => setEmpSearch("")} title="Effacer"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-700 cursor-pointer">
+                  <X className="w-4 h-4" />
+                </button>
+              )}
+            </div>
+          </div>
+          <div className="divide-y divide-slate-100">
+            {filtered.length === 0 && (
+              <p className="p-8 text-sm text-slate-500 text-center">Aucun collaborateur ne correspond à cette recherche.</p>
+            )}
+            {filtered.map((emp) => {
+              const isAdmin = emp.role === "admin";
+              const open = openEmpId === emp.id && !isAdmin;
+              const pendingN = leaves.filter((l) => l.user_id === emp.id && l.status === "pending").length;
+              return (
+                <div key={emp.id}>
+                  <div className="flex items-center hover:bg-slate-50">
+                    <button onClick={() => !isAdmin && setOpenEmpId(open ? null : emp.id)}
+                      className={`flex-1 min-w-0 p-4 flex items-center gap-3 text-left ${isAdmin ? "cursor-default" : "cursor-pointer"}`}>
+                      <ChevronDown className={`w-4 h-4 shrink-0 transition-transform ${isAdmin ? "opacity-0" : "text-slate-400"} ${open ? "rotate-180" : ""}`} />
+                      <div className="min-w-0 flex-1">
+                        <p className="font-semibold text-sm text-slate-900 truncate">
+                          {emp.full_name}
+                          {isAdmin && (
+                            <span className="ml-2 text-[10px] uppercase px-2 py-0.5 bg-[#ddd6fb] text-[#3b2a8f] rounded-full font-bold">
+                              Admin RH
+                            </span>
+                          )}
+                        </p>
+                        <p className="text-xs text-slate-500 truncate">{emp.email}</p>
+                      </div>
+                      {!isAdmin && (
+                        <div className="hidden sm:flex items-center gap-2 text-xs shrink-0">
+                          <span className="px-2 py-0.5 rounded-full bg-[#ece8fb] text-[#3b2a8f] font-semibold">CP {emp.solde_cp}</span>
+                          <span className="px-2 py-0.5 rounded-full bg-sky-100 text-sky-800 font-semibold">RTT {emp.solde_rtt}</span>
+                          {pendingN > 0 && (
+                            <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 font-semibold">{pendingN} en attente</span>
+                          )}
+                        </div>
                       )}
-                    </p>
-                    <p className="text-xs text-slate-500">{emp.email}</p>
-                  </div>
-                  {emp.role !== "admin" && (
-                    <button onClick={() => handleDeleteEmployee(emp.id, emp.full_name)}
-                      className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg cursor-pointer" title="Supprimer">
-                      <Trash2 className="w-4 h-4" />
                     </button>
-                  )}
+                    {!isAdmin && (
+                      <button onClick={() => handleDeleteEmployee(emp.id, emp.full_name)}
+                        className="p-2 mr-3 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg cursor-pointer" title="Supprimer">
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    )}
+                  </div>
+                  {open && <div className="px-4 pb-5 pt-1 space-y-4 bg-slate-50/70">{renderEmpDetails(emp)}</div>}
                 </div>
-                {emp.role !== "admin" && (
-                  <div className="mt-3 flex flex-wrap items-end gap-3">
-                    {fields.map(([key, label]) => (
-                      <label key={key} className="text-[11px] font-semibold uppercase text-slate-500">
-                        {label}
-                        <input type="number" min="0" step="0.5" value={val(key)}
-                          onChange={(e) => setVal(key, e.target.value)}
-                          className="block w-28 mt-1 px-2 py-1.5 rounded-lg border border-slate-300 text-sm font-normal normal-case text-slate-900 outline-none focus:ring-2 focus:ring-[#6b4fd8]" />
-                      </label>
-                    ))}
-                    <button onClick={() => handleSaveRights(emp)} disabled={Object.keys(d).length === 0}
-                      className="px-3 py-1.5 text-white text-xs font-semibold rounded-lg cursor-pointer hover:opacity-90 disabled:opacity-30 disabled:cursor-default"
-                      style={{ backgroundColor: PURPLE }}>
-                      Enregistrer
-                    </button>
-                    <p className="text-xs text-slate-500 ml-auto">
-                      Solde dispo : <strong>{emp.solde_cp} CP</strong> · <strong>{emp.solde_rtt} RTT</strong> · {emp.samedis_utilises}/5 samedis
-                    </p>
-                  </div>
-                )}
-              </div>
-            );
-          })}
+              );
+            })}
+          </div>
         </div>
       </div>
-    </div>
-  );
+    );
+  };
 
   // =========================================================================
   // VUE : EXPORTS
