@@ -1,0 +1,23 @@
+ÉCRITURE — 55 salariés prêts ({'admin': 1, 'confirmer': 2, 'manager': 8, 'employee': 44})
+Base : sqlite:///./sat_hr.db
+Créés : 55 | mis à jour : 0
+
+Managers imposés : 259→234, 292→234, 317→260
+
+ANOMALIES (non importés) (0) :
+  (aucun)
+
+À VÉRIFIER PAR LA RH (13) :
+  - 220 Filipe ALMEIDA SILVA : colonne JOURS vide → solde complet (33 j) supposé, RH à vérifier
+  - 234 Jesfine GERMANO : email corrigé 'j,germano@sat-idf,fr' → 'j.germano@sat-idf.fr'
+  - 264 Jean Luc CHARON : colonne JOURS vide → solde complet (27 j) supposé, RH à vérifier
+  - 276 Dicko BAH : restants (30) > droits (28) → droits relevés à 30
+  - 299 Adao Jorge PEREIRA MARINHO : email corrigé 'adaomarinho3@hotmail,com' → 'adaomarinho3@hotmail.com'
+  - 308 Domingos LOPES VARELA : email corrigé 'samyvarela119@gmail,com' → 'samyvarela119@gmail.com'
+  - 309 Jose SEMEDO MENDES DE BRITO : email corrigé 'carinadebrito123@gmail,com' → 'carinadebrito123@gmail.com'
+  - 309 Jose SEMEDO MENDES DE BRITO : colonne JOURS vide → solde complet (20 j) supposé, RH à vérifier
+  - 312 Joao Pedro PIRES MAGALHAES : colonne JOURS vide → solde complet (18 j) supposé, RH à vérifier
+  - 316 Rogerio BRITO FERREIRA DOS SANTOS : email corrigé 'rogerbsantos1977@gmail,com' → 'rogerbsantos1977@gmail.com'
+  - 316 Rogerio BRITO FERREIRA DOS SANTOS : colonne JOURS vide → solde complet (8 j) supposé, RH à vérifier
+  - 318 Bruno VERDEILLE : aucun droit CP dans le planning → droits à 0, RH à saisir
+  - 319 Azizullah ALOKZAI : aucun droit CP dans le planning → droits à 0, RH à saisir
