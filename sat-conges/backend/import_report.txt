@@ -1,5 +1,5 @@
 ÉCRITURE — 55 salariés prêts ({'admin': 1, 'confirmer': 2, 'manager': 8, 'employee': 44})
-Base : sqlite:///./sat_hr.db
+Base : ep-spring-snow-b9rab1oj-pooler.c-7.eu-central-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require
 Créés : 55 | mis à jour : 0
 
 Managers imposés : 259→234, 292→234, 317→260

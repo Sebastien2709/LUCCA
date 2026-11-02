@@ -86,6 +86,8 @@ def read_planning(path):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--apply", action="store_true", help="écrit réellement en base")
+    ap.add_argument("--force-change", action="store_true",
+                    help="chaque salarié devra choisir un nouveau mot de passe à sa première connexion (recommandé en production)")
     ap.add_argument("--sage", default="coffrefort_ABSENCES.xlsx")
     ap.add_argument("--sign", default="salarié_-_date_de_naissance.xlsx")
     ap.add_argument("--planning", default="PLANNIG_CONGÉS_ANNUELS_2026-2027.xls")
@@ -141,13 +143,16 @@ def main():
                     u.email, u.full_name, u.role, u.confirm_order = d["email"], d["full_name"], d["role"], d["confirm_order"]
                     u.statut, u.date_entree = d["statut"], d["date_entree"]
                     u.can_manage_training = d["trainer"]
+                    if a.force_change:
+                        u.must_change_password = True
                     updated += 1
                 else:
                     s.add(db.User(matricule=d["matricule"], email=d["email"], full_name=d["full_name"],
                                   role=d["role"], confirm_order=d["confirm_order"], statut=d["statut"],
                                   date_entree=d["date_entree"], password_hash=security.hash_password(d["ddmm"]),
                                   droits_cp=d["droits_cp"], cp_deja_pris=d["cp_deja_pris"],
-                                  cp_deja_pris_exercice=exercice, can_manage_training=d["trainer"]))
+                                  cp_deja_pris_exercice=exercice, can_manage_training=d["trainer"],
+                                  must_change_password=a.force_change))
                     created += 1
             s.flush()
             for emp, mgr in FIXED_MANAGERS.items():
